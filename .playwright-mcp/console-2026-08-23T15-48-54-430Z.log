@@ -1,0 +1,21 @@
+[     176ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/runs?limit=10:0
+[     201ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/dashboard/stats:0
+[     203ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/runs?limit=10:0
+[     208ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:5173/sse/token?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImY5MDRjYzM5LTg0YTgtNDc4Yy05MmUwLTgyY2I4ZTU3NDA2NyIsImVtYWlsIjoidGVzdEBleGFtcGxlLmNvbSIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTc4NzIxNzI2NiwiZXhwIjoxNzg3ODIyMDY2fQ.LFSfeqna2-btYAyG2Ko-CDkaEc5v2ndJIktD27cMI7E:0
+[     208ms] [WARNING] [SSE] Connection error: Event @ http://localhost:5173/assets/index-WMAhWZjG.js:223
+[     209ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/dashboard/credits:0
+[    1211ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/dashboard/stats:0
+[    1212ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/runs?limit=10:0
+[    1213ms] [ERROR] Error: Internal Server Error
+    at http://localhost:5173/assets/index-WMAhWZjG.js:44:6896
+    at async He.request (http://localhost:5173/assets/index-WMAhWZjG.js:40:2133)
+    at async Object.stats (http://localhost:5173/assets/index-WMAhWZjG.js:44:8783) @ http://localhost:5173/assets/index-WMAhWZjG.js:35
+[    1214ms] [ERROR] Error: Internal Server Error
+    at http://localhost:5173/assets/index-WMAhWZjG.js:44:6896
+    at async He.request (http://localhost:5173/assets/index-WMAhWZjG.js:40:2133)
+    at async Object.getRuns (http://localhost:5173/assets/index-WMAhWZjG.js:44:9024) @ http://localhost:5173/assets/index-WMAhWZjG.js:35
+[    1218ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/api/dashboard/credits:0
+[    1221ms] [ERROR] Error: Internal Server Error
+    at http://localhost:5173/assets/index-WMAhWZjG.js:44:6896
+    at async He.request (http://localhost:5173/assets/index-WMAhWZjG.js:40:2133)
+    at async Object.credits (http://localhost:5173/assets/index-WMAhWZjG.js:44:8839) @ http://localhost:5173/assets/index-WMAhWZjG.js:35

@@ -1,0 +1,10 @@
+- generic [ref=f4e4]:
+  - heading "HireGen Lead Engine" [level=1] [ref=f4e5]
+  - generic [ref=f4e6]:
+    - generic [ref=f4e7]:
+      - text: Email
+      - textbox "Email" [ref=f4e8]
+    - generic [ref=f4e9]:
+      - text: Password
+      - textbox "Password" [ref=f4e10]
+    - button "Sign In" [ref=f4e11]
