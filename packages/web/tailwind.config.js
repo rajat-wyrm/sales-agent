@@ -8,18 +8,71 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        sidebar: '210 20% 98%',
-        sidebarforeground: '240 5.2% 33.9%',
-        sidebarmuted: '240 4.8% 95.9%',
-        sidebarborder: '240 5.9% 90%',
-        sidebaractive: '225.9 100% 96.7%',
-        sidebaractiveforeground: '244.5 57.9% 50.6%',
-        hot: '0 84.3% 60%',
-        hotsoft: '0 85.7% 97.3%',
-        warm: '37.7 92.1% 50.2%',
-        warmsoft: '48 100% 96.1%',
-        cold: '198.6 88.7% 48.4%',
-        coldsoft: '204 100% 97.1%',
+        border: 'hsl(var(--border))',
+        input: 'hsl(var(--input))',
+        ring: 'hsl(var(--ring))',
+        background: 'hsl(var(--background))',
+        foreground: 'hsl(var(--foreground))',
+        primary: {
+          DEFAULT: 'hsl(var(--primary))',
+          foreground: 'hsl(var(--primary-foreground))',
+          hover: 'hsl(var(--primary-hover))',
+          soft: 'hsl(var(--primary-soft))',
+        },
+        secondary: {
+          DEFAULT: 'hsl(var(--secondary))',
+          foreground: 'hsl(var(--secondary-foreground))',
+        },
+        destructive: {
+          DEFAULT: 'hsl(var(--destructive))',
+          foreground: 'hsl(var(--destructive-foreground))',
+          soft: 'hsl(var(--destructive-soft))',
+        },
+        success: {
+          DEFAULT: 'hsl(var(--success))',
+          foreground: 'hsl(var(--success-foreground))',
+          soft: 'hsl(var(--success-soft))',
+        },
+        warning: {
+          DEFAULT: 'hsl(var(--warning))',
+          foreground: 'hsl(var(--warning-foreground))',
+          soft: 'hsl(var(--warning-soft))',
+        },
+        info: {
+          DEFAULT: 'hsl(var(--info))',
+          foreground: 'hsl(var(--info-foreground))',
+          soft: 'hsl(var(--info-soft))',
+        },
+        muted: {
+          DEFAULT: 'hsl(var(--muted))',
+          foreground: 'hsl(var(--muted-foreground))',
+        },
+        accent: {
+          DEFAULT: 'hsl(var(--accent))',
+          foreground: 'hsl(var(--accent-foreground))',
+        },
+        surface: 'hsl(var(--surface))',
+        'border-strong': 'hsl(var(--border-strong))',
+        sidebar: {
+          DEFAULT: 'hsl(var(--surface))',
+          foreground: 'hsl(var(--foreground))',
+          muted: 'hsl(var(--muted))',
+          border: 'hsl(var(--border))',
+          active: 'hsl(var(--primary-soft))',
+          'active-foreground': 'hsl(var(--primary-hover))',
+        },
+        hot: {
+          DEFAULT: 'hsl(var(--destructive))',
+          soft: 'hsl(var(--destructive-soft))',
+        },
+        warm: {
+          DEFAULT: 'hsl(var(--warning))',
+          soft: 'hsl(var(--warning-soft))',
+        },
+        cold: {
+          DEFAULT: 'hsl(var(--info))',
+          soft: 'hsl(var(--info-soft))',
+        },
       },
       borderRadius: {
         lg: '0.5rem',
@@ -27,7 +80,10 @@ module.exports = {
         sm: '0.25rem',
         smlg: '0.2rem',
       },
+      boxShadow: {
+        card: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
+      },
     },
   },
-  plugins,
+  plugins: [],
 }

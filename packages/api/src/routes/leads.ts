@@ -131,7 +131,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       ${whereClause}
     `;
     const countResult = await sql.unsafe(countQuery, values as any);
-    const countRow = countResult[0] as { total: number } | undefined;
+    const countRow = countResult[0] as unknown as { total: number } | undefined;
     const total = Number(countRow?.total ?? 0);
 
     const rows = await sql.unsafe(`
