@@ -99,7 +99,14 @@ class FreshersworldScraper(BaseScraper):
                 "source_site": "freshersworld.com",
                 "scraped_at": now_iso(),
                 "is_fresher": is_fresher,
-                "raw_payload": {"title": job_title, "company": company_name, "url": job_url},
+                "raw_payload": {
+                    "title": job_title, 
+                    "company": company_name, 
+                    "url": job_url,
+                    "location": location,
+                    "is_fresher": is_fresher,
+                    "scraped_at": now_iso(),
+                },
             }
             leads.append(lead)
 
