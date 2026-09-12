@@ -231,6 +231,7 @@ class FreshersworldScraper(BaseScraper):
                         "job_title": job_title,
                         "about_job": job_title,
                         "experience_required": experience,
+                        "location": location,
                         "salary_range": "",
                         "job_url": job_url,
                         "source_site": "freshersworld.com",
