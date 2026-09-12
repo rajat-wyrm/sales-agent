@@ -101,7 +101,7 @@ export const STAGE_META: Record<PipelineStage, { label: string; className: strin
   bounced: { label: 'Bounced', className: 'bg-destructive-soft text-destructive border-destructive/20' },
 };
 
-export const EMAIL_STATUS_META: Record<EmailStatus, { label: string; className: string }> = {
+export const EMAIL_STATUS_META: Record<Exclude<EmailStatus, null> | 'null', { label: string; className: string }> = {
   valid: { label: 'Email valid', className: 'bg-success-soft text-success border-success/20' },
   invalid: { label: 'Email invalid', className: 'bg-destructive-soft text-destructive border-destructive/20' },
   catch_all: { label: 'Catch-all', className: 'bg-warning-soft text-warning border-warning/20' },
@@ -110,7 +110,7 @@ export const EMAIL_STATUS_META: Record<EmailStatus, { label: string; className: 
   null: { label: 'Not verified', className: 'bg-muted text-muted-foreground border-border' },
 };
 
-export const WHATSAPP_STATUS_META: Record<WhatsAppStatus, { label: string; className: string }> = {
+export const WHATSAPP_STATUS_META: Record<Exclude<WhatsAppStatus, null> | 'null', { label: string; className: string }> = {
   registered: { label: 'WhatsApp on', className: 'bg-success-soft text-success border-success/20' },
   not_registered: {
     label: 'No WhatsApp',

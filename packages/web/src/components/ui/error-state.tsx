@@ -6,6 +6,7 @@ export interface ErrorStateProps {
   title?: string
   message?: string
   onRetry?: () => void
+  retryLabel?: string
   className?: string
 }
 
@@ -13,6 +14,7 @@ export function ErrorState({
   title = "Something went wrong",
   message = "We couldn't load this data. Please try again.",
   onRetry,
+  retryLabel = "Retry",
   className,
 }: ErrorStateProps) {
   return (
@@ -31,7 +33,7 @@ export function ErrorState({
       {onRetry && (
         <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
           <RefreshCw className="h-3.5 w-3.5" />
-          Retry
+          {retryLabel}
         </Button>
       )}
     </div>
