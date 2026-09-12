@@ -861,28 +861,68 @@ def _similarity(a: str, b: str) -> float:
     return 1.0 - _levenshtein(a, b) / max_len
 
 
+def _extract_domain(url: str) -> str:
+    """Extract hostname from job URL."""
+    if not url:
+        return ""
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _build_candidate_string(company_name: str, job_title: str, job_url: str) -> str:
+    """Build normalized composite candidate string from company_name + job_title + job_url_domain."""
+    domain = _extract_domain(job_url)
+    normalized_company = re.sub(r'[^a-z0-9]', ' ', (company_name or "").lower()).strip()
+    normalized_title = re.sub(r'[^a-z0-9]', ' ', (job_title or "").lower()).strip()
+    return f"{normalized_company} {normalized_title} {domain}".strip()
+
+
+def _calculate_candidate_similarity(
+    company1: str, title1: str, url1: str,
+    company2: str, title2: str, url2: str
+) -> float:
+    """Calculate similarity score between candidate lead pairs using normalized company_name + job_title + job_url_domain."""
+    d1 = _extract_domain(url1)
+    d2 = _extract_domain(url2)
+    s1 = _build_candidate_string(company1, title1, url1)
+    s2 = _build_candidate_string(company2, title2, url2)
+    sim = _similarity(s1, s2)
+    if d1 and d2 and d1 != d2:
+        return min(sim, 0.5)
+    return sim
+
+
 async def _find_fuzzy_duplicate(sql: asyncpg.Connection, normalized: dict[str, Any]) -> str | None:
-    """SRS §4.6: Fuzzy match (Levenshtein on company+title, threshold 0.85).
+    """SRS §4.6: Fuzzy match (Levenshtein on company+title+domain, threshold 0.85).
 
     Returns the ID of a possible duplicate lead if one is found, otherwise None.
     """
     company = normalized.get("company_name", "")
     title = normalized.get("job_title", "")
+    url = normalized.get("job_url", "")
     if not company or not title:
         return None
 
-    combined = f"{company} {title}".lower()
     candidates = await sql.fetch(
-        "SELECT l.id, l.company_id, jp.title "
+        "SELECT l.id, c.name as company_name, jp.title, jp.job_url "
         "FROM leads l "
+        "LEFT JOIN companies c ON l.company_id = c.id "
         "JOIN job_postings jp ON l.job_posting_id = jp.id "
         "WHERE l.created_at > NOW() - INTERVAL '30 days' "
         "ORDER BY l.created_at DESC LIMIT 200",
     )
 
     for row in candidates:
-        candidate_combined = f"{company} {row['title']}".lower()
-        if _similarity(combined, candidate_combined) >= 0.85:
+        cand_company = row["company_name"] or ""
+        cand_title = row["title"] or ""
+        cand_url = row["job_url"] or ""
+        sim = _calculate_candidate_similarity(
+            company, title, url,
+            cand_company, cand_title, cand_url
+        )
+        if sim >= 0.85:
             return str(row["id"])
 
     return None

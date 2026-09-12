@@ -1,15 +1,17 @@
 import crypto from 'crypto';
 import { URL } from 'url';
 
-export function generateFingerprint(companyName: string, jobTitle: string, jobUrl: string): string {
-  let domain = '';
-  if (jobUrl) {
-    try {
-      domain = new URL(jobUrl).hostname || '';
-    } catch {
-      domain = '';
-    }
+export function extractDomain(jobUrl: string): string {
+  if (!jobUrl) return '';
+  try {
+    return new URL(jobUrl).hostname || '';
+  } catch {
+    return '';
   }
+}
+
+export function generateFingerprint(companyName: string, jobTitle: string, jobUrl: string): string {
+  const domain = extractDomain(jobUrl);
   const normalizedCompany = (companyName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const normalizedTitle = (jobTitle || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const input = `${normalizedCompany}|${normalizedTitle}|${domain}`;
@@ -52,4 +54,26 @@ export function similarity(a: string, b: string): number {
   const maxLength = Math.max(a.length, b.length);
   if (maxLength === 0) return 1.0;
   return 1 - distance / maxLength;
+}
+
+export function getCandidatePairString(companyName: string, jobTitle: string, jobUrl: string): string {
+  const domain = extractDomain(jobUrl);
+  const normalizedCompany = (companyName || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+  const normalizedTitle = (jobTitle || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+  return `${normalizedCompany} ${normalizedTitle} ${domain}`.trim();
+}
+
+export function calculateCandidateSimilarity(
+  lead1: { companyName?: string; jobTitle?: string; jobUrl?: string },
+  lead2: { companyName?: string; jobTitle?: string; jobUrl?: string }
+): number {
+  const d1 = extractDomain(lead1.jobUrl || '');
+  const d2 = extractDomain(lead2.jobUrl || '');
+  const str1 = getCandidatePairString(lead1.companyName || '', lead1.jobTitle || '', lead1.jobUrl || '');
+  const str2 = getCandidatePairString(lead2.companyName || '', lead2.jobTitle || '', lead2.jobUrl || '');
+  const rawSim = similarity(str1, str2);
+  if (d1 && d2 && d1 !== d2) {
+    return Math.min(rawSim, 0.5);
+  }
+  return rawSim;
 }

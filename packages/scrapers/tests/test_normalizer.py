@@ -1,7 +1,7 @@
 """Tests for the normalizer (dedup fingerprint, fresher filtering, schema mapping, provenance)."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from scrapers.normalizer import normalize_lead, generate_fingerprint, insert_lead
+from scrapers.normalizer import normalize_lead, generate_fingerprint, insert_lead, _calculate_candidate_similarity
 
 
 class TestNormalizeLead:
@@ -359,3 +359,21 @@ class TestGenerateFingerprint:
         fp1 = generate_fingerprint("Tech", "Engineer", "https://tech.com")
         fp2 = generate_fingerprint("Tech", "Engineer", "https://other.com")
         assert fp1 != fp2
+
+
+class TestCandidateSimilarity:
+    def test_distinct_companies_identical_title_low_similarity(self):
+        sim = _calculate_candidate_similarity(
+            "T-Mobile", "Software Engineering Intern", "https://careers.t-mobile.com/job/1",
+            "PwC", "Software Engineering Intern", "https://jobs.pwc.com/job/2"
+        )
+        assert sim < 0.85
+        assert sim <= 0.5
+
+    def test_same_company_identical_title_high_similarity(self):
+        sim = _calculate_candidate_similarity(
+            "T-Mobile", "Software Engineering Intern", "https://careers.t-mobile.com/job/1",
+            "T-Mobile", "Software Engineering Intern", "https://careers.t-mobile.com/job/2"
+        )
+        assert sim == 1.0
+
