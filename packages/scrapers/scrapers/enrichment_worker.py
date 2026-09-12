@@ -103,23 +103,29 @@ async def run_osint_enrichment(
     """OSINT cascade fallback per SRS §4.5.4: holehe + duckduckgo_search."""
     result: dict[str, Any] = {"source": "osint_fallback", "confidence_score": 30}
 
-    # Tier 1: DuckDuckGo search for HR name + company
+    # Tier 1: Verified LinkedIn profile resolution — dork for candidates, READ
+    # each public profile via Jina reader, and only accept when the profile's own
+    # name matches the target (difflib gate) with company corroboration.
+    # Replaces the old "first linkedin.com/in hit" which happily attached a
+    # same-named stranger (never-fabricate golden rule, SRS §6.2).
     if hr_name:
         try:
-            from duckduckgo_search import DDGS
-
-            query = f'"{hr_name}" "{company_name}" site:linkedin.com'
-            ddgs = DDGS()
-            results = ddgs.text(query, max_results=3)
-            for r in results:
-                url = r.get("href", "")
-                if "linkedin.com/in/" in url:
-                    result["hr_linkedin_url"] = url
-                    result["confidence_score"] = 50
-                    logger.info(f"OSINT: found LinkedIn for {hr_name} at {company_name}")
-                    break
-        except Exception as e:
-            logger.warning(f"DuckDuckGo search failed: {e}")
+            from .utils.linkedin_osint import resolve_linkedin_profile
+            prof = await resolve_linkedin_profile(hr_name, company_name)
+            if prof.get("linkedin"):
+                result["hr_linkedin_url"] = prof["linkedin"]
+                if not result.get("hr_name") and prof.get("name"):
+                    result["hr_name"] = prof["name"]
+                # confidence_score is 0..100 here; prof confidence is 0..1
+                result["confidence_score"] = max(
+                    result["confidence_score"], 20 + int(prof["confidence"] * 80)
+                )
+                logger.info(
+                    f"OSINT: verified LinkedIn {prof['linkedin']} "
+                    f"(conf {prof['confidence']}, {prof['source']})"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"LinkedIn OSINT resolve failed for {hr_name}@{company_name}: {e}")
 
     # Tier 2: Generic company contact patterns
     domain = company_domain or company_name.lower().replace(" ", "")
