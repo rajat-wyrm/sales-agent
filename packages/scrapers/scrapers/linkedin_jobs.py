@@ -31,7 +31,7 @@ class LinkedInJobsScraper(BaseScraper):
     tier = 2
     rate_limit_seconds = 5.0
 
-    API_URL = "https://www.linkedin.com/jobs/search/?keywords=fresher%20entry%20level%20intern"
+    API_URL = "https://www.linkedin.com/jobs/search/?keywords=fresher%20entry%20level%20intern&location=India&geoId=102713980"
 
     async def _scrape_with_playwright(self, url: str) -> str:
         """Use Playwright with stealth evasion to render LinkedIn's JS-heavy pages."""

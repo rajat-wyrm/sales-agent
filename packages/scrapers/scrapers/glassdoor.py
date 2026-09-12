@@ -30,7 +30,7 @@ class GlassdoorScraper(BaseScraper):
     tier = 2
     rate_limit_seconds = 3.0
 
-    API_URL = "https://www.glassdoor.com/Job/fresher-jobs-SRCH_KO0,8.htm"
+    API_URL = "https://www.glassdoor.co.in/Job/india-fresher-jobs-SRCH_IL.0,5_IN104_KO6,13.htm"
 
     async def _scrape_with_playwright(self, url: str) -> str:
         try:
@@ -82,7 +82,7 @@ class GlassdoorScraper(BaseScraper):
             link_elem = card.find("a", href=True)
             job_url = link_elem["href"] if link_elem and link_elem.get("href") else ""
             if job_url and not job_url.startswith("http"):
-                job_url = f"https://www.glassdoor.com{job_url}"
+                job_url = f"https://www.glassdoor.co.in{job_url}"
 
             location_elems = card.find_all(attrs={"class": re.compile(r"location|loc")})
             location = location_elems[0].get_text(strip=True)[:80] if location_elems else ""
@@ -105,7 +105,7 @@ class GlassdoorScraper(BaseScraper):
                 "location": location,
                 "salary_range": "",
                 "job_url": job_url,
-                "source_site": "glassdoor.com",
+                "source_site": "glassdoor.co.in",
                 "scraped_at": now_iso(),
                 "is_fresher": is_fresher,
                 "raw_payload": {"title": job_title, "url": job_url},

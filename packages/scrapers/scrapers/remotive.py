@@ -33,7 +33,7 @@ class RemotiveScraper(BaseScraper):
     tier = 1
     rate_limit_seconds = 2.0
 
-    API_URL = "https://remotive.com/api/remote-jobs"
+    API_URL = "https://remotive.com/api/remote-jobs?country=India"
 
     async def scrape(self) -> list[dict[str, Any]]:
         """Scrape Remotive API and return normalized lead dicts."""
@@ -77,6 +77,9 @@ class RemotiveScraper(BaseScraper):
                 experience_required = job.get("experience", "") or ""
                 is_fresher = is_fresher_role(job_title, experience_required, json.dumps(job).lower())
 
+                # India-only: capture posting location for the central geo-gate.
+                job_location = job.get("location", "") or job.get("candidate_required_location", "")
+
                 # Remotive doesn't provide HR info directly
                 lead = {
                     "company_name": job.get("company_name", ""),
@@ -90,6 +93,7 @@ class RemotiveScraper(BaseScraper):
                     "job_title": job_title,
                     "about_job": job.get("description", ""),
                     "experience_required": experience_required,
+                    "location": job_location,
                     "salary_range": job.get("salary", ""),
                     "job_url": job.get("url", ""),
                     "source_site": "remotive.com",

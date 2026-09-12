@@ -104,6 +104,7 @@ class LeverScraper(BaseScraper):
                             "job_title": job_title,
                             "about_job": job.get("descriptionPlain", "") or job.get("descriptionBodyPlain", ""),
                             "experience_required": experience_required,
+                            "location": (job.get("categories") or {}).get("location", "") if isinstance(job.get("categories"), dict) else "",
                             "salary_range": job.get("salaryRange", "") or job.get("salaryDescription", ""),
                             "job_url": job.get("applyUrl", "") or job.get("hostedUrl", ""),
                             "source_site": f"lever.co/{company}",

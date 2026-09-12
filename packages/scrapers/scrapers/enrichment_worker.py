@@ -123,6 +123,28 @@ async def run_osint_enrichment(
 
     # Tier 2: Generic company contact patterns
     domain = company_domain or company_name.lower().replace(" ", "")
+
+    # Tier 2a: OSINT personal-email discovery — generate real corporate name
+    # patterns, MX-validate the domain, best-effort SMTP probe. Higher-value
+    # than generic inboxes because it targets the *person* (SRS §6.1 priority).
+    if hr_name and domain:
+        try:
+            from .utils.osint import osint_find_email
+            found = await osint_find_email(hr_name, domain)
+            if found.get("email"):
+                result["hr_email"] = found["email"]
+                result["method"] = found["method"]
+                # 30 (base) + confidence*40 → 0.8→62, 0.7→58, 0.5→50
+                result["confidence_score"] = max(
+                    result["confidence_score"], 30 + int(found["confidence"] * 40)
+                )
+                logger.info(
+                    f"OSINT: email pattern {found['email']} "
+                    f"(conf {found['confidence']}, {found['method']})"
+                )
+        except Exception as e:
+            logger.warning(f"OSINT email discovery failed for {hr_name}@{domain}: {e}")
+
     generic_emails = [
         f"careers@{domain}.com",
         f"hr@{domain}.com",
@@ -272,10 +294,19 @@ async def process_enrichment_job(
                     await conn.execute(
                         """
                         UPDATE hr_contacts
-                        SET full_name = COALESCE($1, full_name),
-                            linkedin_url = COALESCE($2, linkedin_url),
-                            personal_email = COALESCE($3, personal_email),
-                            personal_mobile = COALESCE($4, personal_mobile),
+                        SET full_name = COALESCE(full_name, $1),
+                            linkedin_url = CASE
+                                WHEN linkedin_url IS NULL OR linkedin_url = ''
+                                     OR $5 > confidence_score
+                                THEN COALESCE($2, linkedin_url) ELSE linkedin_url END,
+                            personal_email = CASE
+                                WHEN personal_email IS NULL OR personal_email = ''
+                                     OR $5 > confidence_score
+                                THEN COALESCE($3, personal_email) ELSE personal_email END,
+                            personal_mobile = CASE
+                                WHEN personal_mobile IS NULL OR personal_mobile = ''
+                                     OR $5 > confidence_score
+                                THEN COALESCE($4, personal_mobile) ELSE personal_mobile END,
                             confidence_score = GREATEST(confidence_score, $5),
                             updated_at = NOW()
                         WHERE id = $6

@@ -92,6 +92,7 @@ class SmartRecruitersScraper(BaseScraper):
                                 "job_title": job_title,
                                 "about_job": job.get("jobDescription", job.get("description", "")),
                                 "experience_required": job.get("experienceLevel", ""),
+                                "location": self._extract_location(job),
                                 "salary_range": "",
                                 "job_url": job.get("link", job.get("applyUrl", job.get("url", ""))),
                                 "source_site": f"smartrecruiters.com/{company}",
@@ -111,3 +112,12 @@ class SmartRecruitersScraper(BaseScraper):
 
         self._logger.info(f"SmartRecruiters: scraped {len(leads)} raw leads")
         return leads
+
+    @staticmethod
+    def _extract_location(job: dict) -> str:
+        """Build a location string from SmartRecruiters posting.location (city/country)."""
+        loc = job.get("location") or {}
+        if isinstance(loc, dict):
+            parts = [loc.get("city", ""), loc.get("region", ""), loc.get("country", "")]
+            return ", ".join(p for p in parts if p)
+        return str(loc) if loc else ""

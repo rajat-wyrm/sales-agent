@@ -27,6 +27,49 @@ class TestNormalizeLead:
         assert result["is_fresher"] is True
         assert len(result["fingerprint"]) == 64
 
+    # ── India-only product correction: central geo-gate ──────────────────────
+    def test_india_gate_rejects_global_source_without_signal(self):
+        raw = {
+            "company_name": "Tech Corp",
+            "job_title": "Fresher Engineer",
+            "job_url": "https://x.com/j",
+            "source_site": "remoteok.com",
+            "about_job": "US only, work in California",
+        }
+        assert normalize_lead(raw)["is_india"] is False
+
+    def test_india_gate_accepts_positive_location(self):
+        raw = {
+            "company_name": "Tech Corp",
+            "job_title": "Fresher Engineer",
+            "job_url": "https://x.com/j",
+            "source_site": "remoteok.com",
+            "location": "Bengaluru, India",
+        }
+        assert normalize_lead(raw)["is_india"] is True
+
+    def test_india_gate_accepts_india_native_source_blank_location(self):
+        raw = {
+            "company_name": "Tech Corp",
+            "job_title": "Fresher Engineer",
+            "job_url": "https://x.com/j",
+            "source_site": "naukri.com",
+            "location": "",
+        }
+        assert normalize_lead(raw)["is_india"] is True
+
+    def test_india_gate_location_beats_foreign_description(self):
+        # India location must win even if description mentions overseas hubs.
+        raw = {
+            "company_name": "Tech Corp",
+            "job_title": "Fresher Engineer",
+            "job_url": "https://x.com/j",
+            "source_site": "glassdoor.com",
+            "location": "Pune, India",
+            "about_job": "support our London and Berlin teams",
+        }
+        assert normalize_lead(raw)["is_india"] is True
+
     def test_missing_hr_name_is_incomplete(self):
         raw = {
             "company_name": "Corp",

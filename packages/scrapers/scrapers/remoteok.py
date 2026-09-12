@@ -67,6 +67,11 @@ class RemoteOkScraper(BaseScraper):
                 if not job_title:
                     continue
 
+                # India-only: RemoteOK supports location filtering; capture the
+                # posting location so the central geo-gate can evaluate it.
+                item_location = (item.get("location", "")
+                                 or item.get("candidate_required_location", ""))
+
                 experience_required = item.get("experience", "") or ""
                 is_fresher = is_fresher_role(job_title, experience_required, json.dumps(item).lower())
 
@@ -82,6 +87,7 @@ class RemoteOkScraper(BaseScraper):
                     "job_title": job_title,
                     "about_job": item.get("description", ""),
                     "experience_required": experience_required,
+                    "location": item_location,
                     "salary_range": item.get("salary", ""),
                     "job_url": item.get("url", ""),
                     "source_site": "remoteok.com",

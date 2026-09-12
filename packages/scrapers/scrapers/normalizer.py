@@ -28,6 +28,7 @@ import redis.asyncio as redis
 import asyncpg
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .utils.fresher_classifier import is_fresher_role as classify_fresher
+from .utils.india_filter import is_india_relevant
 from .utils.career_page_extractor import (
     extract_from_career_page,
     extract_from_job_posting_page,
@@ -577,6 +578,13 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
     experience_required = raw.get("experience_required") or raw.get("experience", "")
     about_job = raw.get("about_job") or raw.get("description", "")
 
+    # Product correction: India-only scoping. Capture location from whichever
+    # field the source populated so the central geo-gate can evaluate it.
+    # NOTE: do NOT fall back to experience_required — that field holds years of
+    # experience, not a location (fixed in issue #7).
+    location = (raw.get("location") or raw.get("job_location")
+                or raw.get("city") or "").strip()
+
     # NLP re-validation per SRS §4.2b: always re-classify using word-boundary matching
     is_fresher = classify_fresher(job_title, str(experience_required), str(about_job))
 
@@ -623,6 +631,7 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
         "job_title": job_title,
         "about_job": about_job,
         "experience_required": experience_required,
+        "location": location,
         "salary_range": raw.get("salary_range", ""),
         "job_url": job_url,
         "source_site": source_site,
@@ -630,6 +639,8 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
         "fingerprint": fingerprint,
         "data_quality": data_quality,
         "is_fresher": is_fresher,
+        "is_india": is_india_relevant({"location": location, "about_job": about_job,
+                                       "source_site": source_site}),
         "raw_payload": raw_payload,
         "hr_extraction_provenance": hr_extraction_provenance,
     }
@@ -1093,6 +1104,15 @@ async def run_normalizer(
                 logger.info(f"Skipping non-fresher job: {normalized['job_title']}")
                 continue
 
+            # Product correction: India-only. Discard out-of-scope (non-India)
+            # records at the filter stage, analogous to the experience filter.
+            if not normalized.get("is_india", True):
+                logger.info(
+                    f"Skipping non-India job: {normalized['job_title']} "
+                    f"[{normalized.get('source_site')}] loc='{normalized.get('location')}'"
+                )
+                continue
+
             # Enrich HR data with LinkedIn cross-reference and OSINT per SRS §4.5
             normalized = await enrich_hr_data(normalized, db_pool)
 
@@ -1128,6 +1148,10 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
             normalized = normalize_lead(raw_data)
 
             if not normalized["is_fresher"]:
+                skipped += 1
+                continue
+
+            if not normalized.get("is_india", True):
                 skipped += 1
                 continue
 

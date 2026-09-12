@@ -98,6 +98,7 @@ class GreenhouseScraper(BaseScraper):
                             "job_title": job_title,
                             "about_job": job.get("content", ""),
                             "experience_required": experience_required,
+                            "location": (job.get("location") or {}).get("name", "") if isinstance(job.get("location"), dict) else (job.get("location") or ""),
                             "salary_range": job.get("metadata", {}).get("salary_range", "") if isinstance(job.get("metadata"), dict) else "",
                             "job_url": job.get("absolute_url", ""),
                             "source_site": f"greenhouse.io/{company}",
