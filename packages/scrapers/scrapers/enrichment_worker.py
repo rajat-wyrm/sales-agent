@@ -130,13 +130,41 @@ async def run_osint_enrichment(
     # Tier 2: Generic company contact patterns
     domain = company_domain or company_name.lower().replace(" ", "")
 
-    # Tier 2a: OSINT personal-email discovery — generate real corporate name
-    # patterns, MX-validate the domain, best-effort SMTP probe. Higher-value
-    # than generic inboxes because it targets the *person* (SRS §6.1 priority).
+    # Email cascade. GitHub public-commit mining is the best FIRST-PARTY source:
+    # a company's public repos expose real staff emails (name + @domain). We fetch
+    # those ONCE, then use them two ways:
+    #   (a) a direct name-match on a real commit author is our strongest signal
+    #       (first-party, self-published), and
+    #   (b) even without a person-match, those real addresses are fed to
+    #       osint_find_email as `known_company_emails`, so it INFERS the company's
+    #       actual local-part pattern instead of guessing blind (SRS §6.1).
+    known_company_emails: list[str] = []
     if hr_name and domain:
         try:
+            from .utils.github_email_osint import github_company_contacts
+            from .utils.linkedin_osint import name_similarity
+            gh = await github_company_contacts(domain)
+            known_company_emails = gh.get("emails", []) or []
+            best, best_sim = None, 0.0
+            for c in gh.get("contacts", []):
+                sim = name_similarity(hr_name, c.get("name", ""))
+                if sim > best_sim:
+                    best_sim, best = sim, c
+            if best and best_sim >= 0.72:
+                result["hr_email"] = best["email"]
+                result["method"] = "github_commit_verified"
+                result["confidence_score"] = max(result["confidence_score"], 30 + int(0.9 * 40))
+                logger.info(f"OSINT: GitHub-verified email {best['email']}")
+            elif gh.get("pattern"):
+                logger.info(f"OSINT: GitHub learned pattern {gh['pattern']!r} for {domain}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"GitHub email mining failed for {hr_name}@{domain}: {e}")
+
+    # Pattern-guess fallback (learns real format from known_company_emails above).
+    if hr_name and domain and not result.get("hr_email"):
+        try:
             from .utils.osint import osint_find_email
-            found = await osint_find_email(hr_name, domain)
+            found = await osint_find_email(hr_name, domain, known_company_emails=known_company_emails)
             if found.get("email"):
                 result["hr_email"] = found["email"]
                 result["method"] = found["method"]
@@ -150,6 +178,25 @@ async def run_osint_enrichment(
                 )
         except Exception as e:
             logger.warning(f"OSINT email discovery failed for {hr_name}@{domain}: {e}")
+
+    # Tier 2a-fallback: multi-engine SERP email-exposure dorking — a published
+    # `name@company.com` in an indexed page (roster/PDF/directory) beats a
+    # generated-and-MX-confirmed guess. Only tried if nothing above matched.
+    if hr_name and domain and not result.get("hr_email"):
+        try:
+            from .utils.serp_dork import dork_find_email
+            sd = await dork_find_email(hr_name, company_name, domain)
+            if sd.get("email"):
+                result["hr_email"] = sd["email"]
+                result["method"] = sd["method"]
+                result["confidence_score"] = max(
+                    result["confidence_score"], 30 + int(sd["confidence"] * 40)
+                )
+                logger.info(
+                    f"OSINT: SERP-exposed email {sd['email']} (conf {sd['confidence']})"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"SERP email dork failed for {hr_name}@{domain}: {e}")
 
     generic_emails = [
         f"careers@{domain}.com",
@@ -165,7 +212,10 @@ async def run_osint_enrichment(
             holehe_result = await run_holehe_check(email)
             if holehe_result.get("valid"):
                 result["company_email"] = email
-                result["hr_email"] = email
+                # only fall back to a generic inbox as the personal email if the
+                # targeted cascade found nothing — never clobber a verified addr.
+                if not result.get("hr_email"):
+                    result["hr_email"] = email
                 result["confidence_score"] = max(result["confidence_score"], 55)
                 logger.info(f"OSINT: holehe validated {email}")
                 break
@@ -294,7 +344,7 @@ async def process_enrichment_job(
             new_hr_name = enrichment_result.get("hr_name", "")
             confidence = enrichment_result.get("confidence_score", 0)
 
-            if new_hr_name or new_hr_linkedin:
+            if new_hr_name or new_hr_linkedin or new_hr_email or new_hr_mobile:
                 # Create or update HR contact
                 if lead["hr_contact_id"]:
                     await conn.execute(

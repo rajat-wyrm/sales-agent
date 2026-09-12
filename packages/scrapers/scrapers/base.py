@@ -173,6 +173,83 @@ class BaseScraper(abc.ABC):
     source_name: str
     tier: int
     rate_limit_seconds: float = 1.0
+    # Per-source overall scrape budget. Multi-board ATS sweeps fan out many
+    # independent public API calls; 60s was too tight for a 40+ company corpus.
+    scrape_timeout_seconds: float = 120.0
+
+    async def _sweep(
+        self,
+        session: "aiohttp.ClientSession",
+        items: list[Any],
+        fetch_one,
+        concurrency: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Run `fetch_one(item)` across `items` with bounded concurrency, flattening
+        the per-item lead lists into one result.
+
+        Root-cause fix for two failure modes every ATS adapter shares:
+          * an error on ONE company (DNS miss, 410, 200-with-HTML → ContentTypeError)
+            must NOT raise and abort the whole run (which used to discard every
+            lead already collected and trip the circuit breaker);
+          * a sequential loop over a 40+ company corpus blows the timeout budget.
+        A single bad slug is now logged and skipped; the rest still land.
+
+        `fetch_one` is called as `fetch_one(session, item)` and returns a list.
+        """
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _guard(item):
+            async with sem:
+                try:
+                    return await fetch_one(session, item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001  (intentional: per-item isolation)
+                    self._logger.debug(
+                        f"{self.source_name}: item skipped ({type(e).__name__}: {e})"
+                    )
+                    return []
+
+        results = await asyncio.gather(*(_guard(i) for i in items))
+        return [lead for group in results for lead in (group or [])]
+
+    @staticmethod
+    def _as_text(value: Any) -> str:
+        """Coerce an ATS field to a TEXT-column-safe string.
+        ATS payloads put dicts (recruitee salary, breezy type/location) where a
+        plain string is expected; binding a dict to a TEXT column raises
+        `asyncpg DataError`. Flatten the useful parts, else empty string.
+        """
+        if value is None or isinstance(value, str):
+            return value or ""
+        if isinstance(value, dict):
+            if "min" in value or "max" in value:
+                parts = [str(p) for p in (value.get("min"), value.get("max")) if p not in (None, "")]
+                cur = value.get("currency") or ""
+                return ("-".join(parts) + (f" {cur}" if cur and parts else "")).strip()
+            if value.get("name"):
+                return str(value["name"])
+            country = value.get("country")
+            if isinstance(country, dict):
+                country = country.get("name", "")
+            loc_bits = [str(b) for b in (value.get("city"), value.get("state"), country) if b]
+            return ", ".join(loc_bits)
+        return str(value)
+
+    async def _get_json(self, session, url, *, timeout=15):
+        """GET and best-effort-parse JSON, tolerating wrong content-type on a 200.
+        Returns (status, data_or_None). Never raises on decode issues.
+        """
+        async with session.get(
+            url, headers={"User-Agent": "HireGen-LeadGen/1.0"},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            if resp.status != 200:
+                return resp.status, None
+            try:
+                return resp.status, await resp.json(content_type=None)
+            except Exception:  # noqa: BLE001
+                return resp.status, None
 
     def __init__(self, redis_client=None, db=None, proxies: Optional[list[str]] = None):
         self._redis = redis_client
@@ -274,7 +351,7 @@ class BaseScraper(abc.ABC):
         attempt = 0
         while attempt < max_attempts:
             try:
-                leads = await asyncio.wait_for(self.scrape(), timeout=60)
+                leads = await asyncio.wait_for(self.scrape(), timeout=self.scrape_timeout_seconds)
                 self._circuit_breaker.record_success()
                 return leads
             except (asyncio.TimeoutError, aiohttp.ClientError, ScrapingError) as e:

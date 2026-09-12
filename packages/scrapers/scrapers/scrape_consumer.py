@@ -29,6 +29,10 @@ SCRAPER_MAP = {
     "usajobs": ("scrapers.usajobs", "USAJobsScraper"),
     "workday": ("scrapers.workday", "WorkdayScraper"),
     "smartrecruiters": ("scrapers.smartrecruiters", "SmartRecruitersScraper"),
+    "ashby": ("scrapers.ashby", "AshbyScraper"),
+    "recruitee": ("scrapers.recruitee", "RecruiteeScraper"),
+    "teamtailor": ("scrapers.teamtailor", "TeamtailorScraper"),
+    "breezy": ("scrapers.breezy", "BreezyScraper"),
     "duckduckgo": ("scrapers.duckduckgo_search", "DuckDuckGoScraper"),
     "reddit": ("scrapers.reddit_jobs", "RedditScraper"),
     "twitter": ("scrapers.twitter_jobs", "TwitterScraper"),
@@ -53,6 +57,7 @@ DEFAULT_SOURCES = [
     "indeed", "foundit", "instahyre", "wellfound", "glassdoor", "shine",
     "cutshort", "linkedin", "freshersworld",
     "arbeitnow", "usajobs", "duckduckgo",
+    "ashby", "recruitee", "smartrecruiters", "breezy",
 ]
 
 

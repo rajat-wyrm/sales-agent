@@ -6,6 +6,9 @@ FRESHER_KEYWORDS = [
     "no experience", "no-experience", "entry level", "entry-level",
     "graduate trainee", "campus hire", "0 years",
     "intern", "internship", "new grad", "new-grad",
+    # India fresher-hiring idiom: "junior"/"graduate" (e.g. "BE graduate",
+    # "Junior Developer") denote entry level within this product's fresher scope.
+    "junior", "graduate", "undergraduate", "freshers",
 ]
 
 
