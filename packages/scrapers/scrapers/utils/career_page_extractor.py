@@ -116,6 +116,37 @@ def is_generic_email(email: str) -> bool:
     return local_part in GENERIC_LOCAL_PARTS
 
 
+def normalize_mobile_e164(raw: str) -> str:
+    """Normalize an Indian mobile number to E.164 (+91XXXXXXXXXX).
+
+    India-first product + WhatsApp/Meta Cloud API require a country-coded E.164
+    number, yet scraped mobiles arrive as '98765 43210', '09876543210',
+    '0091-98765-43210', '+91 98765 43210', or a bare 10-digit. Returns E.164 or
+    '' if the input is not a plausible 10-digit Indian mobile (never fabricates,
+    never accepts landlines/too-short as if they were reachable).
+
+    Indian mobile rule (stdlib, no phonenumbers dep): local part is 10 digits
+    starting 6-9; a leading 0 / 00 / 0091 / +91 / 91 prefix is stripped/normalized.
+    """
+    if not raw:
+        return ""
+    s = raw.strip()
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return ""
+    # reduce to the 10-digit national number by peeling known prefixes
+    if digits.startswith("00"):        # international access code 00 -> +
+        digits = digits[2:]
+    if digits.startswith("91") and len(digits) > 10:   # country code
+        digits = digits[2:]
+    if digits.startswith("0") and len(digits) == 11:   # leading trunk zero
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return f"+91{digits}"
+    return ""                            # not a valid Indian mobile
+    return f"+91{digits}"
+
+
 def is_valid_email_format(email: str) -> bool:
     """Reject garbage emails that match the regex but aren't real email addresses.
 

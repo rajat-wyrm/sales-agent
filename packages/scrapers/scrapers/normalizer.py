@@ -34,6 +34,7 @@ from .utils.career_page_extractor import (
     extract_from_job_posting_page,
     is_valid_email_format,
     is_generic_email,
+    normalize_mobile_e164,
 )
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,11 @@ def extract_hr_contact_fallback(raw: dict[str, Any], company_name: str) -> dict[
     if email:
         result["email"] = email
     if mobile:
-        result["mobile"] = mobile
+        # E.164-normalize (India-first + WhatsApp Cloud API need +91...); drop
+        # numbers that aren't a valid Indian mobile so we never outreach garbage.
+        norm = normalize_mobile_e164(mobile)
+        if norm:
+            result["mobile"] = norm
 
     return result
 

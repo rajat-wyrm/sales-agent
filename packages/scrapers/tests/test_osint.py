@@ -40,3 +40,13 @@ def test_render_handles_short_name_without_crash():
     parts = _name_parts("Al")  # first='al', last=''
     # last[0] slicing on empty must not raise
     assert _render("{first}.{last[0]}", parts) is not None
+
+
+def test_mobile_e164_normalization():
+    from scrapers.utils.career_page_extractor import normalize_mobile_e164 as n
+    for variant in ("+91 98765 43210", "09876543210", "9876543210",
+                    "0091-98765-43210", "919876543210", "+919876543210"):
+        assert n(variant) == "+919876543210", variant
+    # landline, too-short, bad mobile prefix, empty all rejected (never fabricate)
+    for bad in ("(0471) 234 5678", "12345", "5876543210", ""):
+        assert n(bad) == "", bad
