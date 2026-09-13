@@ -99,8 +99,11 @@ async def run_osint_enrichment(
     company_name: str,
     hr_name: str,
     company_domain: str,
+    api_keys: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """OSINT cascade fallback per SRS §4.5.4: holehe + duckduckgo_search."""
+    """OSINT cascade per SRS §4.5.4 — free/public sources first, then (only if the
+    record is STILL missing a contact) a per-vendor paid waterfall gated on the
+    keys actually configured. Never spends a credit when free data suffices."""
     result: dict[str, Any] = {"source": "osint_fallback", "confidence_score": 30}
 
     # Tier 1: Verified LinkedIn profile resolution — dork for candidates, READ
@@ -198,12 +201,65 @@ async def run_osint_enrichment(
         except Exception as e:  # noqa: BLE001
             logger.warning(f"SERP email dork failed for {hr_name}@{domain}: {e}")
 
+    # Tier 2b: cert-transparency (crt.sh) + Wayback archival harvest — both key-
+    # free public OSINT. crt.sh leaks addresses from cert subjects/SANs and often
+    # reveals extra subdomains; Wayback recovers HR emails from *rotated/archived*
+    # careers pages that 404 today. Two uses: (a) feed these real addresses into
+    # the pattern-inference set, (b) a direct name-match is first-party-ish proof.
+    if domain and domain != ".com":
+        harvested: list[str] = []
+        try:
+            from .utils.osint_contacts import crtsh_emails, wayback_emails
+            harvested += await crtsh_emails(domain)
+            for path in (f"https://www.{domain}/careers", f"https://{domain}/careers"):
+                harvested += await wayback_emails(path)
+                if harvested:
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"crt.sh/Wayback harvest skipped for {domain}: {e}")
+        harvested = [e for e in harvested if e and "@" in e]
+        # (a) enrich the pattern-inference corpus with any new real addresses
+        known_company_emails = list(dict.fromkeys(known_company_emails + harvested))
+        # (b) direct name-match on a leaked/archived address
+        if hr_name and harvested and not result.get("hr_email"):
+            try:
+                from .utils.linkedin_osint import name_similarity
+                for em in harvested:
+                    local = em.split("@")[0].replace(".", " ").replace("_", " ").replace("-", " ")
+                    # require the whole-name tokens to align, not a single letter
+                    if name_similarity(hr_name, local) >= 0.72:
+                        result["hr_email"] = em
+                        result["method"] = "osint_archive_crtsh"
+                        result["confidence_score"] = max(result["confidence_score"], 58)
+                        logger.info(f"OSINT: crt.sh/Wayback matched {em}")
+                        break
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"crt.sh/Wayback name-match skipped: {e}")
+
     generic_emails = [
         f"careers@{domain}.com",
         f"hr@{domain}.com",
         f"jobs@{domain}.com",
         f"recruiting@{domain}.com",
     ]
+
+    # Tier 2c: Gravatar — a free existence+identity oracle for any email we found.
+    # A Gravatar profile means the mailbox is real (Google/WordPress verify on
+    # signup) and often carries the person's real display name. Used to LIFT
+    # confidence and recover a name, never to fabricate an address.
+    if result.get("hr_email"):
+        try:
+            from .utils.osint_contacts import gravatar_lookup
+            g = await asyncio.to_thread(gravatar_lookup, result["hr_email"])
+            if g.get("verified_email"):
+                result["email_exists"] = True
+                result["gravatar_photo"] = g.get("gravatar_photo", "")
+                if g.get("hr_name") and not result.get("hr_name"):
+                    result["hr_name"] = g["hr_name"]
+                result["confidence_score"] = min(95, max(result["confidence_score"], 60) + 10)
+                logger.info(f"OSINT: Gravatar confirms {result['hr_email']} (+10 conf)")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Gravatar lookup skipped: {e}")
 
     # Tier 3: holehe check on company emails
     for email in generic_emails:
@@ -219,10 +275,56 @@ async def run_osint_enrichment(
                 result["confidence_score"] = max(result["confidence_score"], 55)
                 logger.info(f"OSINT: holehe validated {email}")
                 break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"holehe check failed for {email}: {e}")
 
+    # Tier 4 (last resort): PAID waterfall — only when every free tier above
+    # failed to find a personal email, and only vendors whose key is configured.
+    # Runs cheapest-first and stops at the first hit, so a record costs at most
+    # one credit. §6.3: vendor confidence/verified flags are carried through.
+    if hr_name and domain and not result.get("hr_email") and (api_keys or _env_vendor_keys()):
+        try:
+            from .utils.email_providers import paid_email_waterfall
+            paid = await paid_email_waterfall(hr_name, domain, api_keys or {})
+            if paid.get("hr_email"):
+                result["hr_email"] = paid["hr_email"]
+                if paid.get("hr_name") and not result.get("hr_name"):
+                    result["hr_name"] = paid["hr_name"]
+                if paid.get("hr_linkedin_url") and not result.get("hr_linkedin_url"):
+                    result["hr_linkedin_url"] = paid["hr_linkedin_url"]
+                result["method"] = f"paid_{paid.get('source', 'vendor')}"
+                result["source"] = paid.get("source", "paid")
+                result["paid_credits"] = int(paid.get("credits", 1))
+                # email_providers adapters already report confidence on a 0..100
+                # scale (Apollo verified=90, findymail safe=85, ...). Do NOT rescale
+                # — clamp. (A prior `* 90` here produced 8100, which defeated the
+                # §6.3 no-clobber UPDATE guard and let a paid guess overwrite a
+                # verified email.)
+                conf = max(0, min(100, int(paid.get("confidence", 60))))
+                if paid.get("verified"):
+                    conf = max(conf, 85)
+                result["confidence_score"] = max(result["confidence_score"], conf)
+                logger.info(
+                    f"PAID {paid.get('source')}: {paid['hr_email']} "
+                    f"(verified={paid.get('verified')})"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Paid email waterfall failed for {hr_name}@{domain}: {e}")
+
     return result
+
+
+def _env_vendor_keys() -> dict[str, str]:
+    """Any email-vendor API key present in the environment (module-level fallback)."""
+    keys = {}
+    for env, slug in (
+        ("HUNTER_API_KEY", "hunter"), ("APOLLO_API_KEY", "apollo_io"),
+        ("FINDYMAIL_API_KEY", "findymail"), ("PROSPEO_API_KEY", "prospeo"),
+        ("LUSHA_API_KEY", "lusha"), ("ROCKETREACH_API_KEY", "rocketreach"),
+    ):
+        if os.environ.get(env):
+            keys[slug] = os.environ[env]
+    return keys
 
 
 async def process_enrichment_job(
@@ -281,7 +383,10 @@ async def process_enrichment_job(
                         try:
                             api_keys[k] = decrypt_api_key(v)
                         except Exception:
-                            api_keys[k] = v
+                            # decrypt failed — do NOT forward the ciphertext blob
+                            # to a vendor as if it were a real key (garbage auth +
+                            # potential key-format oracle). Skip this provider.
+                            continue
             except Exception:
                 pass
 
@@ -290,35 +395,72 @@ async def process_enrichment_job(
         credits_used = 0
         status = "success"
 
-        # Step 1: ContactOut API (if HR LinkedIn URL known and key configured)
-        if provider in ("contactout", "auto"):
+        # Cost-aware order (SRS §4.5.4 + operator rule: free first, paid ONLY for
+        # records still missing a contact, and per-record). The cascade runs every
+        # free/public source, then fires the paid email waterfall internally as a
+        # last resort (Tier 4) only if no free tier produced an address.
+        if provider == "auto" or provider in ("osint", "osint_fallback"):
+            enrichment_result = await run_osint_enrichment(
+                db_pool, company_name, hr_name, company_domain, api_keys
+            )
+            used_provider = enrichment_result.get("method") or enrichment_result.get(
+                "source", "osint_fallback")
+            # free tiers -> osint_* ; a per-record paid hit -> paid_<vendor>
+            credits_used = int(enrichment_result.get("paid_credits", 0))
+
+        # Step 1: ContactOut API — only when the cascade found nothing usable AND
+        # a LinkedIn URL is on file (it keys off the profile) AND a key exists.
+        if (
+            not enrichment_result or not enrichment_result.get("hr_email")
+        ) and provider in ("contactout", "auto"):
             contactout_key = api_keys.get("contactout") or os.environ.get("ACCONTACT_OUT_API_KEY")
             if contactout_key and hr_linkedin:
                 result = await call_contactout(hr_linkedin, contactout_key)
                 if result:
-                    enrichment_result = result
+                    enrichment_result = {**(enrichment_result or {}), **result}
                     used_provider = "contactout"
                     credits_used = 1
                     status = "success"
 
-        # Step 2: Snov.io API (fallback)
-        if not enrichment_result and provider in ("snovio", "auto"):
+        # Step 2: Snov.io API — final paid fallback if still no email.
+        if (
+            not enrichment_result or not enrichment_result.get("hr_email")
+        ) and provider in ("snovio", "auto"):
             snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
             snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
             if snovio_key and hr_name and company_name:
                 result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
                 if result:
-                    enrichment_result = result
+                    enrichment_result = {**(enrichment_result or {}), **result}
                     used_provider = "snovio"
                     credits_used = 1
                     status = "success"
 
-        # Step 3: OSINT cascade fallback (always available)
-        if not enrichment_result:
-            enrichment_result = await run_osint_enrichment(db_pool, company_name, hr_name, company_domain)
-            used_provider = enrichment_result.get("source", "osint_fallback")
-            if not enrichment_result.get("hr_email") and not enrichment_result.get("hr_linkedin_url"):
-                status = "no_match"
+        # Explicit single-provider override (operator clicked "enrich via X").
+        if provider not in ("auto", "osint", "osint_fallback", "contactout", "snovio"):
+            try:
+                from .utils.email_providers import enrich_via_apollo_io, enrich_via_hunter, enrich_via_lusha, enrich_via_rocketreach, enrich_via_prospeo, enrich_via_findymail
+                _single = {
+                    "hunter": enrich_via_hunter, "apollo": enrich_via_apollo_io,
+                    "apollo_io": enrich_via_apollo_io, "lusha": enrich_via_lusha,
+                    "rocketreach": enrich_via_rocketreach, "prospeo": enrich_via_prospeo,
+                    "findymail": enrich_via_findymail,
+                }.get(provider)
+                if _single:
+                    r = await _single(hr_name, company_domain, api_keys.get(provider))
+                    if r and r.get("hr_email"):
+                        enrichment_result = {**(enrichment_result or {}), **r}
+                        used_provider = provider
+                        credits_used = 1
+                        status = "success"
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"explicit provider {provider} failed: {e}")
+
+        if enrichment_result is None or (
+            not enrichment_result.get("hr_email")
+            and not enrichment_result.get("hr_linkedin_url")
+        ):
+            status = "no_match"
 
         # Update enrichment_log
         await conn.execute(

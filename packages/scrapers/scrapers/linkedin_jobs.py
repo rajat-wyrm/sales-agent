@@ -34,36 +34,25 @@ class LinkedInJobsScraper(BaseScraper):
     API_URL = "https://www.linkedin.com/jobs/search/?keywords=fresher%20entry%20level%20intern&location=India&geoId=102713980"
 
     async def _scrape_with_playwright(self, url: str) -> str:
-        """Use Playwright with stealth evasion to render LinkedIn's JS-heavy pages."""
+        """Render a JS-heavy page via the shared escalating HTTP layer.
+
+        Prefers Playwright+stealth (now proxy-aware + best-effort CAPTCHA solve);
+        if no browser is installed or it is blocked, degrades to curl_cffi TLS
+        impersonation instead of aborting the whole source (SRS §3.3 / §9.4).
+        """
+        from .utils.http_client import fetch
         try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.set_extra_http_headers({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "DNT": "1",
-                    "Sec-Fetch-Site": "none",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Dest": "document",
-                    "Cache-Control": "max-age=0",
-                    "Upgrade-Insecure-Requests": "1",
-                })
-                await page.emulate_media_type("screen")
-                await page.set_viewport_size({"width": 1920, "height": 1080})
-                await page.goto(url, wait_until="networkidle", timeout=60000)
-                await page.wait_for_timeout(8000)
-                content = await page.content()
-                await browser.close()
-                return content
-        except ImportError:
-            raise ScraperError("Playwright not installed — required for LinkedIn (anti-bot)")
-        except Exception as e:
-            raise ScraperError(f"Playwright scrape failed: {e}")
+            resp = await fetch(url, timeout=45, min_engine="playwright", max_engine="playwright")
+            if len(resp.text) > 500:
+                return resp.text
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Playwright render failed for {url}: {e}; falling back to curl_cffi")
+        try:
+            resp = await fetch(url, timeout=25, min_engine="curl", max_engine="curl")
+            return resp.text
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"All render engines failed for {url}: {e}")
+            return ""
 
     async def scrape(self) -> list[dict[str, Any]]:
         leads: list[dict[str, Any]] = []

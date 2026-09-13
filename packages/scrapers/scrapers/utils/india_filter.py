@@ -28,6 +28,7 @@ import re
 INDIA_NATIVE_SOURCES = {
     "naukri", "shine", "internshala", "freshersworld", "instahyre",
     "cutshort", "foundit", "adzuna", "jooble", "indeed", "workday",
+    "unstop", "jobinsider", "iimjobs", "timesjobs",
 }
 
 # Strong positive India location signals.
