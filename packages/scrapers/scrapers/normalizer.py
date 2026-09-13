@@ -1014,18 +1014,21 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
     # Insert lead
     lead_id = await sql.fetchval(
         """INSERT INTO leads (job_posting_id, company_id, hr_contact_id, data_quality, 
-           possible_duplicate_of, hr_extraction_provenance)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-         job_id,
-         company_id,
-         hr_id,
-         normalized["data_quality"],
-         possible_dup_id,
-         json.dumps(normalized.get("hr_extraction_provenance", {})),
-     )
+            possible_duplicate_of, hr_extraction_provenance)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
+        job_id,
+        company_id,
+        hr_id,
+        normalized["data_quality"],
+        possible_dup_id,
+        json.dumps(normalized.get("hr_extraction_provenance", {})),
+    )
+
+    if lead_id:
+        from .api_utils.scoring_client import recompute_lead_score
+        await recompute_lead_score(sql, str(lead_id), pipeline_stage="discovered")
 
     return lead_id
-
 
 async def run_normalizer(
     redis_client: redis.Redis,
