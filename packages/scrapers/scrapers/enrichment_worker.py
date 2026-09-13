@@ -347,14 +347,18 @@ async def process_enrichment_job(
     async with db_pool.acquire() as conn:
         lead = await conn.fetchrow(
             """
-            SELECT l.id, l.hr_name, l.hr_contact_id, l.pipeline_stage,
+            SELECT l.id, l.hr_contact_id, l.pipeline_stage,
                    hc.full_name, hc.linkedin_url, hc.personal_email, hc.personal_mobile,
                    c.name as company_name, c.domain
             FROM leads l
             JOIN companies c ON l.company_id = c.id
             LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
             WHERE l.id = $1
-            FOR UPDATE
+            -- Lock only the leads row we mutate. `FOR UPDATE` over the whole
+            -- query is illegal because hr_contacts is on the nullable side of
+            -- the LEFT JOIN (`FOR UPDATE cannot be applied to the nullable side
+            -- of an outer join`).
+            FOR UPDATE OF l
             """,
             lead_id,
         )
@@ -363,17 +367,31 @@ async def process_enrichment_job(
             logger.warning(f"Lead not found: {lead_id}")
             return
 
-        hr_name = lead["full_name"] or lead["hr_name"] or ""
+        # The HR name lives on the joined hr_contacts row (the normalizer never
+        # stores it on leads). Empty until a contact is attached — the cascade
+        # then infers/looks it up by company + any name we discover.
+        hr_name = lead["full_name"] or ""
         company_name = lead["company_name"] or ""
         company_domain = lead["domain"] or ""
         hr_linkedin = lead["linkedin_url"] or ""
 
-        # Load user-supplied API keys from DB
+        # `requested_by` is a UUID FK to users for manual runs, but scheduled
+        # runs pass sentinels like "system"/"daily_scheduler". Coerce to a real
+        # UUID (or None) so neither the users lookup nor the enrichment_log
+        # FK insert dies on a non-UUID string.
+        user_id: Any = None
+        try:
+            from uuid import UUID
+            user_id = UUID(str(requested_by))
+        except (ValueError, TypeError):
+            user_id = None
+
+        # Load user-supplied API keys from DB (only for a real user run).
+        api_keys: dict[str, str] = {}
         user_row = await conn.fetchrow(
             "SELECT api_keys FROM users WHERE id = $1",
-            requested_by,
-        )
-        api_keys: dict[str, str] = {}
+            user_id,
+        ) if user_id else None
         if user_row and user_row["api_keys"]:
             try:
                 from .crypto_utils.decrypt import decrypt_api_key
@@ -471,7 +489,7 @@ async def process_enrichment_job(
             """,
             lead_id,
             used_provider,
-            requested_by,
+            user_id,                       # NULL for scheduled/sentinel runs
             json.dumps({"provider": provider, "requested_at": requested_at}),
             json.dumps(enrichment_result or {}),
             credits_used,
@@ -552,11 +570,11 @@ async def process_enrichment_job(
         f"user:{requested_by}:sse",
         json.dumps({
             "type": "enrichment_complete",
-            "lead_id": lead_id,
+            "lead_id": str(lead_id),
             "provider": used_provider,
             "status": status,
             "timestamp": asyncio.get_event_loop().time(),
-        }),
+        }, default=str),
     )
 
     logger.info(f"Enrichment complete for lead {lead_id}: provider={used_provider}, status={status}")
