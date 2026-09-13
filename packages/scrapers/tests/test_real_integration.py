@@ -265,3 +265,67 @@ class TestScraperMap:
         """SRS §16.1 requires >=15 sources."""
         from scrapers.scrape_consumer import SCRAPER_MAP
         assert len(SCRAPER_MAP) >= 15, f"Need >=15 sources, only {len(SCRAPER_MAP)}"
+
+
+@pytest.mark.asyncio
+async def test_process_enrichment_job_sentinel_runs_end_to_end(db_pool, redis_client, monkeypatch):
+    """Regression: process_enrichment_job crashed on EVERY real job.
+
+    Four latent bugs, only caught once this path was run against a live DB:
+      1. `SELECT l.hr_name` — leads has no hr_name column (name lives on
+         hr_contacts.full_name).
+      2. bare `FOR UPDATE` over the LEFT JOIN is illegal (nullable side).
+      3. scheduled runs pass requested_by='daily_scheduler' (non-UUID) which
+         crashed the users lookup AND the enrichment_log FK insert.
+      4. SSE json.dumps(lead_id) on a UUID object -> not serializable.
+    All four live in the DB-write / publish tail, reached regardless of whether
+    the OSINT cascade finds anything, so we stub the network tiers for hermeticity.
+    """
+    import importlib
+    from scrapers.normalizer import normalize_lead, insert_lead
+    from scrapers.enrichment_worker import process_enrichment_job
+
+    async def _empty(*a, **k):
+        return {}
+
+    async def _none(*a, **k):
+        return []
+
+    for mod, fn, repl in [
+        ("linkedin_osint", "resolve_linkedin_profile", _empty),
+        ("github_email_osint", "github_company_contacts", _empty),
+        ("osint", "osint_find_email", _empty),
+        ("serp_dork", "dork_find_email", _empty),
+        ("osint_contacts", "crtsh_emails", _none),
+        ("osint_contacts", "wayback_emails", _none),
+        ("osint_contacts", "gravatar_lookup", lambda e: {}),
+    ]:
+        monkeypatch.setattr(importlib.import_module("scrapers.utils." + mod), fn, repl)
+
+    raw = {
+        "company_name": "Acme Regression Co",
+        "job_title": "Fresher Engineer",
+        "job_url": "https://careers.acme-regression.test/j/42",
+        "description": "fresher role 0-1 years",
+        "source_site": "test",
+    }
+    async with db_pool.acquire() as conn:
+        lead_id = await insert_lead(conn, normalize_lead(raw))
+        assert lead_id, "seed lead should insert"
+
+    # Sentinel requester (what the scheduler uses) must not raise.
+    await process_enrichment_job(
+        {"lead_id": lead_id, "provider": "auto", "requested_by": "daily_scheduler"},
+        redis_client, db_pool,
+    )
+
+    async with db_pool.acquire() as conn:
+        log = await conn.fetchrow(
+            "SELECT provider, status, requested_by FROM enrichment_log WHERE lead_id = $1",
+            lead_id,
+        )
+        stage = await conn.fetchval(
+            "SELECT pipeline_stage FROM leads WHERE id = $1", lead_id)
+    assert log is not None, "enrichment_log row must be written"
+    assert log["requested_by"] is None, "sentinel requester must store NULL, not crash"
+    assert stage == "enriched", "pipeline_stage must advance to enriched"
