@@ -28,11 +28,13 @@ import redis.asyncio as redis
 import asyncpg
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .utils.fresher_classifier import is_fresher_role as classify_fresher
+from .utils.india_filter import is_india_relevant
 from .utils.career_page_extractor import (
     extract_from_career_page,
     extract_from_job_posting_page,
     is_valid_email_format,
     is_generic_email,
+    normalize_mobile_e164,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,7 +193,11 @@ def extract_hr_contact_fallback(raw: dict[str, Any], company_name: str) -> dict[
     if email:
         result["email"] = email
     if mobile:
-        result["mobile"] = mobile
+        # E.164-normalize (India-first + WhatsApp Cloud API need +91...); drop
+        # numbers that aren't a valid Indian mobile so we never outreach garbage.
+        norm = normalize_mobile_e164(mobile)
+        if norm:
+            result["mobile"] = norm
 
     return result
 
@@ -577,6 +583,13 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
     experience_required = raw.get("experience_required") or raw.get("experience", "")
     about_job = raw.get("about_job") or raw.get("description", "")
 
+    # Product correction: India-only scoping. Capture location from whichever
+    # field the source populated so the central geo-gate can evaluate it.
+    # NOTE: do NOT fall back to experience_required — that field holds years of
+    # experience, not a location (fixed in issue #7).
+    location = (raw.get("location") or raw.get("job_location")
+                or raw.get("city") or "").strip()
+
     # NLP re-validation per SRS §4.2b: always re-classify using word-boundary matching
     is_fresher = classify_fresher(job_title, str(experience_required), str(about_job))
 
@@ -623,6 +636,7 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
         "job_title": job_title,
         "about_job": about_job,
         "experience_required": experience_required,
+        "location": location,
         "salary_range": raw.get("salary_range", ""),
         "job_url": job_url,
         "source_site": source_site,
@@ -630,6 +644,8 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
         "fingerprint": fingerprint,
         "data_quality": data_quality,
         "is_fresher": is_fresher,
+        "is_india": is_india_relevant({"location": location, "about_job": about_job,
+                                       "source_site": source_site}),
         "raw_payload": raw_payload,
         "hr_extraction_provenance": hr_extraction_provenance,
     }
@@ -861,28 +877,68 @@ def _similarity(a: str, b: str) -> float:
     return 1.0 - _levenshtein(a, b) / max_len
 
 
+def _extract_domain(url: str) -> str:
+    """Extract hostname from job URL."""
+    if not url:
+        return ""
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _build_candidate_string(company_name: str, job_title: str, job_url: str) -> str:
+    """Build normalized composite candidate string from company_name + job_title + job_url_domain."""
+    domain = _extract_domain(job_url)
+    normalized_company = re.sub(r'[^a-z0-9]', ' ', (company_name or "").lower()).strip()
+    normalized_title = re.sub(r'[^a-z0-9]', ' ', (job_title or "").lower()).strip()
+    return f"{normalized_company} {normalized_title} {domain}".strip()
+
+
+def _calculate_candidate_similarity(
+    company1: str, title1: str, url1: str,
+    company2: str, title2: str, url2: str
+) -> float:
+    """Calculate similarity score between candidate lead pairs using normalized company_name + job_title + job_url_domain."""
+    d1 = _extract_domain(url1)
+    d2 = _extract_domain(url2)
+    s1 = _build_candidate_string(company1, title1, url1)
+    s2 = _build_candidate_string(company2, title2, url2)
+    sim = _similarity(s1, s2)
+    if d1 and d2 and d1 != d2:
+        return min(sim, 0.5)
+    return sim
+
+
 async def _find_fuzzy_duplicate(sql: asyncpg.Connection, normalized: dict[str, Any]) -> str | None:
-    """SRS §4.6: Fuzzy match (Levenshtein on company+title, threshold 0.85).
+    """SRS §4.6: Fuzzy match (Levenshtein on company+title+domain, threshold 0.85).
 
     Returns the ID of a possible duplicate lead if one is found, otherwise None.
     """
     company = normalized.get("company_name", "")
     title = normalized.get("job_title", "")
+    url = normalized.get("job_url", "")
     if not company or not title:
         return None
 
-    combined = f"{company} {title}".lower()
     candidates = await sql.fetch(
-        "SELECT l.id, l.company_id, jp.title "
+        "SELECT l.id, c.name as company_name, jp.title, jp.job_url "
         "FROM leads l "
+        "LEFT JOIN companies c ON l.company_id = c.id "
         "JOIN job_postings jp ON l.job_posting_id = jp.id "
         "WHERE l.created_at > NOW() - INTERVAL '30 days' "
         "ORDER BY l.created_at DESC LIMIT 200",
     )
 
     for row in candidates:
-        candidate_combined = f"{company} {row['title']}".lower()
-        if _similarity(combined, candidate_combined) >= 0.85:
+        cand_company = row["company_name"] or ""
+        cand_title = row["title"] or ""
+        cand_url = row["job_url"] or ""
+        sim = _calculate_candidate_similarity(
+            company, title, url,
+            cand_company, cand_title, cand_url
+        )
+        if sim >= 0.85:
             return str(row["id"])
 
     return None
@@ -1053,6 +1109,15 @@ async def run_normalizer(
                 logger.info(f"Skipping non-fresher job: {normalized['job_title']}")
                 continue
 
+            # Product correction: India-only. Discard out-of-scope (non-India)
+            # records at the filter stage, analogous to the experience filter.
+            if not normalized.get("is_india", True):
+                logger.info(
+                    f"Skipping non-India job: {normalized['job_title']} "
+                    f"[{normalized.get('source_site')}] loc='{normalized.get('location')}'"
+                )
+                continue
+
             # Enrich HR data with LinkedIn cross-reference and OSINT per SRS §4.5
             normalized = await enrich_hr_data(normalized, db_pool)
 
@@ -1088,6 +1153,10 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
             normalized = normalize_lead(raw_data)
 
             if not normalized["is_fresher"]:
+                skipped += 1
+                continue
+
+            if not normalized.get("is_india", True):
                 skipped += 1
                 continue
 

@@ -45,7 +45,8 @@ async def health():
             "scrapers": [
                 "remoteok", "arbeitnow", "remotive", "github_jobs",
                 "greenhouse", "lever", "adzuna", "jooble",
-                "usajobs", "workday", "smartrecruiters",
+                "usajobs", "workday", "smartrecruiters", "ashby",
+                "recruitee", "teamtailor", "breezy",
                 "duckduckgo", "reddit", "twitter", "telegram",
             ],
         },
@@ -70,6 +71,7 @@ def _get_tier(name: str) -> int:
         "remoteok": 1, "arbeitnow": 1, "remotive": 1, "github_jobs": 1,
         "adzuna": 1, "jooble": 1, "usajobs": 1,
         "greenhouse": 3, "lever": 3, "workday": 3, "smartrecruiters": 3,
+        "ashby": 3, "recruitee": 3, "teamtailor": 3, "breezy": 3,
         "linkedin": 2, "naukri": 2, "internshala": 2, "indeed": 2,
         "foundit": 2, "instahyre": 2, "freshersworld": 2,
         "angelist": 2, "glassdoor": 2, "shine": 2, "cutshort": 2,
@@ -120,6 +122,7 @@ async def start_consumers():
     from scrapers.draft_worker import consume_draft_queue
     from scrapers.send_worker import consume_send_queue
     from scrapers.verify_send_worker import consume_verify_send_queue
+    from scrapers.scheduler import daily_scrape_scheduler
 
     redis_client = get_redis()
 
@@ -132,6 +135,8 @@ async def start_consumers():
     if redis_client:
         tasks.append(asyncio.create_task(consume_scrape_queue(redis_client, db_pool)))
         tasks.append(asyncio.create_task(run_normalizer(redis_client, db_pool)))
+        # daily full-fleet heartbeat (India jobs -> enrich -> verify -> draft -> send)
+        tasks.append(asyncio.create_task(daily_scrape_scheduler(redis_client)))
 
         if db_pool:
             tasks.append(asyncio.create_task(consume_enrichment_queue(redis_client, db_pool)))

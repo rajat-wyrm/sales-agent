@@ -1,4 +1,4 @@
-import { generateFingerprint, levenshteinDistance, similarity } from '../src/utils/dedup';
+import { generateFingerprint, levenshteinDistance, similarity, calculateCandidateSimilarity } from '../src/utils/dedup';
 
 describe('Fingerprint', () => {
   test('same company/title/url -> same fingerprint (different path)', () => {
@@ -69,5 +69,38 @@ describe('Similarity', () => {
 
   test('empty strings', () => {
     expect(similarity('', '')).toBe(1.0);
+  });
+});
+
+describe('Candidate Similarity', () => {
+  test('distinct companies with identical job titles return low similarity', () => {
+    const tMobileLead = {
+      companyName: 'T-Mobile',
+      jobTitle: 'Software Engineering Intern',
+      jobUrl: 'https://careers.t-mobile.com/job/101',
+    };
+    const pwcLead = {
+      companyName: 'PwC',
+      jobTitle: 'Software Engineering Intern',
+      jobUrl: 'https://jobs.pwc.com/job/202',
+    };
+    const sim = calculateCandidateSimilarity(tMobileLead, pwcLead);
+    expect(sim).toBeLessThan(0.85);
+    expect(sim).toBeLessThanOrEqual(0.5);
+  });
+
+  test('same company and domain with same title returns high similarity', () => {
+    const lead1 = {
+      companyName: 'T-Mobile',
+      jobTitle: 'Software Engineering Intern',
+      jobUrl: 'https://careers.t-mobile.com/job/101',
+    };
+    const lead2 = {
+      companyName: 'T-Mobile',
+      jobTitle: 'Software Engineering Intern',
+      jobUrl: 'https://careers.t-mobile.com/job/102',
+    };
+    const sim = calculateCandidateSimilarity(lead1, lead2);
+    expect(sim).toBe(1.0);
   });
 });

@@ -32,20 +32,25 @@ class CutShortScraper(BaseScraper):
     API_URL = "https://www.cutshort.io/jobs/fresher-jobs"
 
     async def _scrape_with_playwright(self, url: str) -> str:
+        """Render a JS-heavy page via the shared escalating HTTP layer.
+
+        Prefers Playwright+stealth (now proxy-aware + best-effort CAPTCHA solve);
+        if no browser is installed or it is blocked, degrades to curl_cffi TLS
+        impersonation instead of aborting the whole source (SRS §3.3 / §9.4).
+        """
+        from .utils.http_client import fetch
         try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.set_extra_http_headers({"User-Agent": self._get_user_agent()})
-                await page.goto(url, wait_until="networkidle", timeout=60000)
-                content = await page.content()
-                await browser.close()
-                return content
-        except ImportError:
-            raise ScraperError("Playwright not installed — required for CutShort (JS-heavy)")
-        except Exception as e:
-            raise ScraperError(f"Playwright scrape failed: {e}")
+            resp = await fetch(url, timeout=45, min_engine="playwright", max_engine="playwright")
+            if len(resp.text) > 500:
+                return resp.text
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Playwright render failed for {url}: {e}; falling back to curl_cffi")
+        try:
+            resp = await fetch(url, timeout=25, min_engine="curl", max_engine="curl")
+            return resp.text
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"All render engines failed for {url}: {e}")
+            return ""
 
     async def scrape(self) -> list[dict[str, Any]]:
         leads: list[dict[str, Any]] = []
@@ -96,7 +101,8 @@ class CutShortScraper(BaseScraper):
                 "hr_linkedin_url": "",
                 "job_title": job_title,
                 "about_job": job_title,
-                "experience_required": location,
+                "experience_required": "",
+                "location": location,
                 "salary_range": "",
                 "job_url": job_url,
                 "source_site": "cutshort.io",

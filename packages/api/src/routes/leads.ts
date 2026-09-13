@@ -7,6 +7,7 @@ import { authorize } from '../middleware/auth';
 import { recomputeLeadScore } from '../utils/scoring';
 import { logAuditEvent } from '../utils/audit';
 import { publishSSE } from '../utils/sse';
+import { calculateCandidateSimilarity } from '../utils/dedup';
 
 const paginationSchema = z.object({
   page: z.coerce.number().min(1).default(1),
@@ -131,7 +132,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       ${whereClause}
     `;
     const countResult = await sql.unsafe(countQuery, values as any);
-    const countRow = countResult[0] as { total: number } | undefined;
+    const countRow = countResult[0] as unknown as { total: number } | undefined;
     const total = Number(countRow?.total ?? 0);
 
     const rows = await sql.unsafe(`
@@ -821,9 +822,9 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const candidates = await sql.unsafe(`
       SELECT l1.id as lead_id, l1.lead_score, l1.pipeline_stage, l1.created_at,
-             c1.name as company_name, jp1.title as job_title,
+             c1.name as company_name, jp1.title as job_title, jp1.job_url as job_url,
              l2.id as duplicate_of_id, l2.lead_score as dup_score, l2.pipeline_stage as dup_stage,
-             c2.name as dup_company_name, jp2.title as dup_job_title
+             c2.name as dup_company_name, jp2.title as dup_job_title, jp2.job_url as dup_job_url
       FROM leads l1
       JOIN companies c1 ON l1.company_id = c1.id
       JOIN job_postings jp1 ON l1.job_posting_id = jp1.id
@@ -846,7 +847,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       dup_stage: row.dup_stage,
       dup_company_name: row.dup_company_name,
       dup_job_title: row.dup_job_title,
-      similarity: 1,
+      similarity: calculateCandidateSimilarity(
+        { companyName: row.company_name, jobTitle: row.job_title, jobUrl: row.job_url },
+        { companyName: row.dup_company_name, jobTitle: row.dup_job_title, jobUrl: row.dup_job_url }
+      ),
     }));
 
     return { duplicates: rows };

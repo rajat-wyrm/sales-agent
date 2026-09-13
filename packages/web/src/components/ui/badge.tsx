@@ -3,14 +3,15 @@ import { cn } from "@/components/ui/cn"
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   variant?:
-    | "default"
-    | "primary"
-    | "success"
-    | "warning"
-    | "danger"
-    | "info"
-    | "outline"
-    | "muted"
+  | "default"
+  | "primary"
+  | "success"
+  | "warning"
+  | "danger"
+  | "info"
+  | "outline"
+  | "muted"
+  | "secondary"
 }
 
 const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(

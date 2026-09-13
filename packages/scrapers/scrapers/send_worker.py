@@ -138,6 +138,14 @@ async def process_send_job(
     channel = payload.get("channel", "both")
     draft_id = payload.get("draft_id")
     requested_by = payload.get("requested_by", "system")
+    # outreach_log.sent_by + users lookup require a real UUID; scheduled runs
+    # pass sentinels ("system") -> coerce to None so the FK/lookup can't crash.
+    user_id: Any = None
+    try:
+        from uuid import UUID
+        user_id = UUID(str(requested_by))
+    except (ValueError, TypeError):
+        user_id = None
 
     if not lead_id:
         logger.error("Send job missing lead_id")
@@ -157,10 +165,10 @@ async def process_send_job(
                 f"user:{requested_by}:sse",
                 json.dumps({
                     "type": "send_blocked",
-                    "lead_id": lead_id,
+                    "lead_id": str(lead_id),
                     "reason": "do_not_contact",
                     "timestamp": asyncio.get_event_loop().time(),
-                }),
+                }, default=str),
             )
             return
 
@@ -185,8 +193,8 @@ async def process_send_job(
         # Load user-supplied API keys
         user_row = await conn.fetchrow(
             "SELECT api_keys FROM users WHERE id = $1",
-            requested_by,
-        )
+            user_id,
+        ) if user_id else None
         api_keys: dict[str, str] = {}
         if user_row and user_row["api_keys"]:
             try:
@@ -197,7 +205,7 @@ async def process_send_job(
                         try:
                             api_keys[k] = decrypt_api_key(v)
                         except Exception:
-                            api_keys[k] = v
+                            continue  # never forward undecryptable ciphertext
             except Exception:
                 pass
 
@@ -240,7 +248,7 @@ async def process_send_job(
                         """,
                         lead_id,
                         draft_id if draft_id else None,
-                        requested_by,
+                        user_id,
                         result.get("provider_message_id"),
                         result["status"],
                     )
@@ -266,7 +274,7 @@ async def process_send_job(
                         """,
                         lead_id,
                         draft_id if draft_id else None,
-                        requested_by,
+                        user_id,
                         result.get("provider_message_id"),
                         result["status"],
                     )
@@ -285,10 +293,10 @@ async def process_send_job(
         f"user:{requested_by}:sse",
         json.dumps({
             "type": "send_complete",
-            "lead_id": lead_id,
+            "lead_id": str(lead_id),
             "results": results,
             "timestamp": asyncio.get_event_loop().time(),
-        }),
+        }, default=str),
     )
 
     logger.info(f"Send complete for lead {lead_id}: {results}")
