@@ -229,7 +229,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-phi4">
       <PageHeader
         title="Settings"
         description="Configure scrapers, API keys, scoring, and scheduling"

@@ -5,7 +5,7 @@ import { getDB } from '../utils/db';
 import { getRedis } from '../utils/redis';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
-import { encryptApiKeys, decryptApiKeys } from '../utils/crypto';
+import { encryptApiKeys, decryptApiKeys, maskApiKeys } from '../utils/crypto';
 import { logAuditEvent } from '../utils/audit';
 
 const triggerRunSchema = z.object({
@@ -69,6 +69,55 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
         job_id: runId,
         sources: sources || 'all',
       });
+    },
+  );
+
+  fastify.post(
+    '/runs/army',
+    { preValidation: [authorize(['admin'])] },
+    async (req, reply) => {
+      // One-click army run: scrape every source AND immediately re-enrich any
+      // lead still missing a contact. The Python workers own the queue + sweep;
+      // this endpoint just authenticates and forwards, so the browser never
+      // talks to the internal worker service directly.
+      const parseResult = triggerRunSchema.safeParse(req.body || {});
+      if (!parseResult.success) {
+        return reply.status(400).send({ error: 'Invalid body' });
+      }
+      const workersUrl = process.env.WORKERS_URL || 'http://workers:8000';
+      const triggeredBy = (req.user as { id: string }).id;
+      try {
+        const res = await fetch(`${workersUrl}/army/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sources: parseResult.data.sources || null, triggered_by: triggeredBy }),
+        });
+        const data = await res.json();
+        await logAuditEvent({
+          user_id: triggeredBy,
+          action: 'trigger_army',
+          resource_type: 'scrape_run',
+          resource_id: (data as any)?.run_id || 'army',
+          details: { sweep_reenqueued: (data as any)?.sweep_reenqueued },
+        });
+        return reply.status(res.ok ? 202 : 502).send(data);
+      } catch (err) {
+        return reply.status(502).send({ error: 'Worker army trigger unreachable', detail: (err as Error).message });
+      }
+    },
+  );
+
+  fastify.get(
+    '/army/status',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (_req, reply) => {
+      const workersUrl = process.env.WORKERS_URL || 'http://workers:8000';
+      try {
+        const res = await fetch(`${workersUrl}/army/status`, { method: 'GET' });
+        return reply.send(await res.json());
+      } catch (err) {
+        return reply.status(502).send({ error: 'Worker status unreachable', detail: (err as Error).message });
+      }
     },
   );
 
@@ -188,15 +237,20 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'User not found' });
     }
 
-    let decrypted: Record<string, string | undefined> = {};
+    // SECURITY: never return decrypted provider secrets to the client. Report
+    // only a masked view (last-4) so the UI can show state without exfiltrating
+    // credentials. decryptApiKeys stays used elsewhere for server-side calls.
+    void decryptApiKeys;
+    let masked: Record<string, string> = {};
     if (result[0]?.api_keys) {
-      const parsedKeys = typeof result[0].api_keys === 'string'
-        ? JSON.parse(result[0].api_keys)
-        : result[0].api_keys;
-      decrypted = decryptApiKeys(parsedKeys);
+      const parsedKeys =
+        typeof result[0].api_keys === 'string'
+          ? JSON.parse(result[0].api_keys)
+          : result[0].api_keys;
+      masked = maskApiKeys(parsedKeys);
     }
 
-    return { api_keys: decrypted };
+    return { api_keys: masked };
   });
 
   fastify.get('/settings/:key', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
@@ -241,5 +295,69 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     return { message: 'Settings updated', updated: results };
+  });
+
+  // ---- Suppression / do-not-contact list (server-side, non-negotiable) -----
+  // Admins manage the global blocklist here; the send worker + webhook opt-outs
+  // both write to it, and outreach is blocked whenever a contact matches.
+  const suppressionSchema = z.object({
+    contact: z.string().min(1),
+    channel: z.enum(['email', 'whatsapp', 'any']).default('any'),
+    reason: z.enum(['opted_out', 'bounced', 'blocked', 'provider_rejected', 'compliance_hold', 'manual']).default('manual'),
+  });
+
+  fastify.get('/suppressions', { preValidation: [authorize(['admin'])] }, async (_req, reply) => {
+    const sql = getDB();
+    const rows = await sql.unsafe(
+      `SELECT id, normalized_contact, channel, reason, source, created_at
+       FROM suppressions ORDER BY created_at DESC LIMIT 1000`,
+    );
+    return reply.send({ suppressions: rows });
+  });
+
+  fastify.post('/suppressions', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const parsed = suppressionSchema.safeParse(req.body || {});
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid body', details: parsed.error.issues });
+    const { contact, channel, reason } = parsed.data;
+    const normalized = String(contact).trim().toLowerCase();
+    const sql = getDB();
+    await sql.unsafe(
+      `INSERT INTO suppressions (normalized_contact, channel, reason, source)
+       VALUES ($1, $2, $3, 'manual')
+       ON CONFLICT (normalized_contact, channel) DO UPDATE SET reason = EXCLUDED.reason`,
+      [normalized, channel, reason],
+    );
+    // Also flag matching leads do_not_contact so in-flight leads stop immediately.
+    if (channel !== 'whatsapp') {
+      await sql.unsafe(
+        `UPDATE leads SET do_not_contact = true, updated_at = NOW()
+         WHERE id IN (SELECT l.id FROM leads l JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+                      WHERE lower(hc.personal_email) = $1)`,
+        [normalized],
+      );
+    }
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'add_suppression',
+      resource_type: 'suppression',
+      resource_id: '',
+      details: { channel, reason }, // NOTE: do not log the contact PII itself
+    });
+    return reply.status(201).send({ message: 'Contact suppressed' });
+  });
+
+  fastify.delete('/suppressions/:id', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const idResult = z.string().uuid().safeParse((req.params as { id: string }).id);
+    if (!idResult.success) return reply.status(400).send({ error: 'Invalid id' });
+    const sql = getDB();
+    const n = await sql.unsafe(`DELETE FROM suppressions WHERE id = $1 RETURNING id`, [idResult.data]);
+    if (!n || n.length === 0) return reply.status(404).send({ error: 'Not found' });
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'remove_suppression',
+      resource_type: 'suppression',
+      resource_id: idResult.data,
+    });
+    return { message: 'Suppression removed' };
   });
 };

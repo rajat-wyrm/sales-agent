@@ -15,6 +15,7 @@ import json
 import asyncio
 import logging
 import os
+from urllib.parse import quote
 from typing import Any
 
 import redis.asyncio as redis
@@ -23,20 +24,78 @@ import asyncpg
 from .utils.db import get_db_pool
 from .api_utils.scoring_client import recompute_lead_score
 
+from .utils.redact import redact_email, redact_phone
+
 logger = logging.getLogger(__name__)
 
-UNSUBSCRIBE_FOOTER = """
+# Compliance footer (CAN-SPAM §5: must contain a clear unsubscribe mechanism +
+# a valid postal address). Both are operator-configurable so we NEVER ship a
+# fabricated address. If unset, we emit an explicit ACTION-REQUIRED placeholder
+# rather than pretending to be compliant.
+COMPANY_POSTAL_ADDRESS = os.environ.get(
+    "COMPANY_POSTAL_ADDRESS", ""
+).strip() or "[ACTION REQUIRED: set COMPANY_POSTAL_ADDRESS to your registered mailing address]"
+
+
+def _base_url() -> str:
+    base = os.environ.get("UNSUBSCRIBE_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        base = os.environ.get("PUBLIC_APP_URL", "").strip().rstrip("/")
+    return base
+
+
+async def mint_unsubscribe_token(conn, email: str, channel: str = "email") -> str:
+    """Return the unsubscribe URL for THIS recipient.
+
+    Mints an opaque, unguessable token mapped to the recipient's normalised
+    contact and persists it (outreach_tokens). The public /optout route resolves
+    the contact ONLY from that token — so no raw email is ever put in a URL and no
+    anonymous caller can force-suppress an address they weren't sent a link for.
+    RFC-8058 one-click, without the poisoning/PII-in-URL downsides.
+    """
+    import secrets
+    base = _base_url()
+    if not base:
+        # No configured endpoint -> mailto fallback (still a valid opt-out path).
+        return "mailto:unsubscribe@hiregen.ai?subject=Unsubscribe"
+    token = secrets.token_urlsafe(24)
+    await conn.execute(
+        "INSERT INTO outreach_tokens (token, normalized_contact, channel) VALUES ($1,$2,$3) "
+        "ON CONFLICT (token) DO NOTHING",
+        token, email.strip().lower(), channel,
+    )
+    return f"{base}/api/optout?t={quote(token, safe='')}"
+
+
+async def build_unsubscribe_footer(conn, email: str) -> str:
+    link = await mint_unsubscribe_token(conn, email, "email")
+    return f"""
 <hr style="margin-top: 32px; border: none; border-top: 1px solid #e5e7eb;" />
 <p style="font-size: 12px; color: #6b7280; line-height: 1.6;">
   You received this email because your company is hiring and we thought HireGen could help.
   If you would prefer not to receive outreach from us,
-  <a href="mailto:unsubscribe@hiregen.ai?subject=Unsubscribe&body=Please%20unsubscribe%20me%20from%20 HireGen%20outreach."
-     style="color: #2563eb; text-decoration: underline;">click here to unsubscribe</a>.
+  <a href="{link}" style="color: #2563eb; text-decoration: underline;">click here to unsubscribe</a>.
 </p>
-<p style="font-size: 12px; color: #9ca3af;">
-  HireGen, 123 Innovation Drive, Suite 400, San Francisco, CA 94105
-</p>
+<p style="font-size: 12px; color: #9ca3af;">{COMPANY_POSTAL_ADDRESS}</p>
 """
+
+
+
+async def _is_suppressed(conn, normalized_contact: str, channel: str) -> bool:
+    """Server-side suppression check against the suppressions store.
+
+    Matches the exact normalized contact OR its local-part only when a broad
+    'any'-channel entry exists. A suppression hit (opted_out / bounced / blocked
+    / compliance_hold / manual) MUST stop outreach regardless of the lead flag.
+    """
+    if not normalized_contact:
+        return False
+    n = await conn.fetchval(
+        "SELECT 1 FROM suppressions WHERE normalized_contact = $1 AND (channel = $2 OR channel = 'any') LIMIT 1",
+        normalized_contact.strip().lower(),
+        channel,
+    )
+    return bool(n)
 
 
 async def send_email(
@@ -190,6 +249,34 @@ async def process_send_job(
             logger.warning(f"Lead not found: {lead_id}")
             return
 
+        # ANTI-SPAM / NO-DUPLICATE-OUTREACH (server-side, non-negotiable): refuse
+        # to re-send the same channel to a lead already reached within the cooldown
+        # window. Configurable via SEND_COOLDOWN_HOURS (default 24h). This is the
+        # real gate — the frontend cannot be trusted as the boundary.
+        cooldown_h = float(os.environ.get("SEND_COOLDOWN_HOURS", "24"))
+        if cooldown_h > 0:
+            recent = await conn.fetchval(
+                """
+                SELECT count(*) FROM outreach_log
+                WHERE lead_id = $1
+                  AND channel = ANY($2::text[])
+                  AND delivery_status = 'sent'
+                  AND sent_at > NOW() - make_interval(hours => $3)
+                """,
+                lead_id,
+                [c for c in ("email", "whatsapp") if channel in (c, "both")],
+                cooldown_h,
+            )
+            if recent:
+                logger.warning(f"Send blocked: lead {lead_id} reached in last {cooldown_h}h (dedup)")
+                await redis_client.publish(
+                    f"user:{requested_by}:sse",
+                    json.dumps({"type": "send_blocked", "lead_id": str(lead_id),
+                                "reason": "cooldown", "timestamp": asyncio.get_event_loop().time()},
+                               default=str),
+                )
+                return
+
         # Load user-supplied API keys
         user_row = await conn.fetchrow(
             "SELECT api_keys FROM users WHERE id = $1",
@@ -234,9 +321,12 @@ async def process_send_job(
                 email = lead["hr_email"] or lead["company_email"]
                 if not email:
                     results.append({"channel": "email", "status": "failed", "reason": "no email address"})
+                elif await _is_suppressed(conn, email, "email"):
+                    logger.warning(f"Email send blocked: {redact_email(email)} is suppressed/opted-out")
+                    results.append({"channel": "email", "status": "blocked", "reason": "suppressed"})
                 else:
                     subject = draft["subject"] if draft else f"Opportunity at {lead_id}"
-                    body = (draft["body"] if draft else "") + UNSUBSCRIBE_FOOTER
+                    body = (draft["body"] if draft else "") + await build_unsubscribe_footer(conn, email)
                     result = await send_email(email, subject, body, email_api_key or "", from_email)
                     results.append({"channel": "email", **result})
 
@@ -262,6 +352,9 @@ async def process_send_job(
                 phone = lead["hr_mobile"] or lead["company_phone"]
                 if not phone:
                     results.append({"channel": "whatsapp", "status": "failed", "reason": "no phone number"})
+                elif await _is_suppressed(conn, phone, "whatsapp"):
+                    logger.warning(f"WhatsApp send blocked: {redact_phone(phone)} is suppressed/opted-out")
+                    results.append({"channel": "whatsapp", "status": "blocked", "reason": "suppressed"})
                 else:
                     message = draft["body"] if draft else ""
                     result = await send_whatsapp(phone, message)

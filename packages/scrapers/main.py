@@ -17,6 +17,10 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Shared asyncpg pool captured at startup so the on-demand /army/run sweep can
+# query under-enriched leads without creating a second pool.
+_db_pool = None
+
 
 class ScrapeRequest(BaseModel):
     sources: Optional[list[str]] = None
@@ -77,6 +81,7 @@ def _get_tier(name: str) -> int:
         "angelist": 2, "glassdoor": 2, "shine": 2, "cutshort": 2,
         "duckduckgo": 4, "reddit": 4, "twitter": 4, "telegram": 4,
         "facebook": 4, "college": 4,
+        "apna": 2, "workindia": 2, "hirist": 2, "classicjobs": 2,
     }
     return tier_map.get(name, 3)
 
@@ -96,6 +101,51 @@ async def trigger_scrape(req: ScrapeRequest):
         }),
     )
     return {"message": "Scrape job queued", "run_id": run_id}
+
+
+@app.get("/army/status")
+async def army_status():
+    """Queue depths for every pipeline stage — drives the frontend live status."""
+    redis_client = get_redis()
+    async def llen(k):
+        try:
+            return await redis_client.llen(k)
+        except Exception:  # noqa: BLE001
+            return -1
+    return {
+        "raw": await llen("raw_leads_queue:requests"),
+        "enrichment": await llen("enrichment_queue:requests"),
+        "verification": await llen("verification_queue:requests"),
+        "draft": await llen("draft_queue:requests"),
+    }
+
+
+@app.post("/army/run")
+async def army_run(req: ScrapeRequest):
+    """One-click army: enqueue a full-fleet scrape AND an immediate
+    re-enrichment sweep so leads already in the DB but missing contacts get the
+    fallback cascade retried now (not just at the next daily tick). Scraping and
+    the sweep are independent; chaining handles enrich→verify→draft after.
+    """
+    redis_client = get_redis()
+    run_id = str(uuid.uuid4())
+    await redis_client.lpush(
+        "scrape_queue:requests",
+        json.dumps({
+            "run_id": run_id,
+            "run_type": "manual",
+            "sources": req.sources,
+            "triggered_by": req.triggered_by,
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        }),
+    )
+    swept = 0
+    try:
+        from scrapers.scheduler import sweep_unenriched
+        swept = await sweep_unenriched(redis_client, _db_pool)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"army sweep failed (scrape still queued): {e}")
+    return {"message": "Army run queued", "run_id": run_id, "sweep_reenqueued": swept}
 
 
 @app.on_event("startup")
@@ -130,13 +180,15 @@ async def start_consumers():
         db_pool = await get_db_pool()
     except Exception:
         db_pool = None
+    global _db_pool
+    _db_pool = db_pool
 
     tasks = []
     if redis_client:
         tasks.append(asyncio.create_task(consume_scrape_queue(redis_client, db_pool)))
         tasks.append(asyncio.create_task(run_normalizer(redis_client, db_pool)))
         # daily full-fleet heartbeat (India jobs -> enrich -> verify -> draft -> send)
-        tasks.append(asyncio.create_task(daily_scrape_scheduler(redis_client)))
+        tasks.append(asyncio.create_task(daily_scrape_scheduler(redis_client, db_pool=db_pool)))
 
         if db_pool:
             tasks.append(asyncio.create_task(consume_enrichment_queue(redis_client, db_pool)))

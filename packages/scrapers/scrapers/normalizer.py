@@ -16,6 +16,7 @@ confidence, method, timestamp.
 """
 
 import json
+import os
 import asyncio
 import logging
 import hashlib
@@ -28,7 +29,8 @@ import redis.asyncio as redis
 import asyncpg
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .utils.fresher_classifier import is_fresher_role as classify_fresher
-from .utils.india_filter import is_india_relevant
+from .utils.india_filter import is_india_relevant, derive_company_domain
+from .queue import chain_lead
 from .utils.career_page_extractor import (
     extract_from_career_page,
     extract_from_job_posting_page,
@@ -36,6 +38,8 @@ from .utils.career_page_extractor import (
     is_generic_email,
     normalize_mobile_e164,
 )
+
+from .utils.redact import redact_email
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +320,7 @@ async def discover_hr_via_dork(company_name: str, company_domain: str) -> dict[s
                             result["name"] = name_from_email
                     result["source"] = result.get("source") or "duckduckgo_snippet"
                     result["confidence"] = result.get("confidence") or 0.65
-                    logger.info(f"Dork found email for {company_name}: {email}")
+                    logger.info(f"Dork found email for {company_name}: {redact_email(email)}")
                     return result
 
     return result
@@ -458,7 +462,7 @@ async def fallback_hr_cascade(
         stage_result["result"] = {"email": career_info["email"]}
         if career_info.get("contact_url"):
             stage_result["result"]["url"] = career_info["contact_url"]
-        logger.info(f"Career page found email for {company_name}: {career_info['email']}")
+        logger.info(f"Career page found email for {company_name}: {redact_email(career_info['email'])}")
     else:
         stage_result["failed"] = True
 
@@ -478,7 +482,7 @@ async def fallback_hr_cascade(
         stage_result["source"] = "whois_registry"
         stage_result["confidence"] = 0.4
         stage_result["result"] = {"email": whois_email, "registrar": whois_meta.get("registrar")}
-        logger.info(f"WHOIS found email for {company_name}: {whois_email}")
+        logger.info(f"WHOIS found email for {company_name}: {redact_email(whois_email)}")
     else:
         stage_result["failed"] = True
         stage_result["result"] = {"error": whois_meta.get("error", "no match")}
@@ -558,14 +562,14 @@ async def run_holehe_check(email: str) -> dict[str, Any]:
             try:
                 result = json.loads(stdout.decode())
                 platforms = [k for k, v in result.items() if v]
-                logger.info(f"holehe: {email} registered on {len(platforms)} platforms")
+                logger.info(f"holehe: {redact_email(email)} registered on {len(platforms)} platforms")
                 return {"valid": len(platforms) > 0, "platforms": platforms}
             except json.JSONDecodeError:
                 pass
     except FileNotFoundError:
         logger.warning("holehe not installed, skipping OSINT check")
     except Exception as e:
-        logger.warning(f"holehe check failed for {email}: {e}")
+        logger.warning(f"holehe check failed for {redact_email(email)}: {e}")
     
     return {"valid": False, "platforms": []}
 
@@ -648,6 +652,9 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
                                        "source_site": source_site}),
         "raw_payload": raw_payload,
         "hr_extraction_provenance": hr_extraction_provenance,
+        # Who triggered the scrape, so downstream auto-chaining publishes SSE to
+        # the right user channel and the browser updates live (not just on poll).
+        "requested_by": raw.get("requested_by") or "system",
     }
 
 
@@ -804,14 +811,9 @@ async def enrich_hr_data(
     # Step 5: Direct contact extraction from career pages (SRS §4.5.3 fallback)
     # Try to get direct contact from company's own career/contact pages
     if not hr_email and not hr_mobile and company_name:
-        # Extract domain from company name or job URL
-        domain = ""
-        if job_url:
-            domain = urlparse(job_url).hostname or ""
-        if not domain:
-            # Guess domain from company name
-            domain = company_name.lower().replace(" ", "").replace(".", "").replace(",", "")
-            domain = f"{domain}.com"
+        # Derive the *employer* domain (never the aggregator host) for career-page
+        # contact extraction.
+        domain = derive_company_domain(company_name, job_url)
 
         career_info = await extract_from_career_page(domain, company_name)
         if career_info.get("email") and not hr_email:
@@ -986,18 +988,20 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
     if possible_dup_id:
         logger.info(f"Lead flagged as fuzzy duplicate of {possible_dup_id}: {fp}")
 
-    # Find or create company
+    # Find or create company — using the *employer* domain, never the job-board
+    # host (apna.co/naukri.com would misroute every email/OSINT lookup).
+    employer_domain = derive_company_domain(normalized["company_name"], normalized["job_url"])
     company = await sql.fetchrow(
         "SELECT id FROM companies WHERE name = $1 OR domain = $2 LIMIT 1",
         normalized["company_name"],
-        urlparse(normalized["job_url"]).hostname if normalized["job_url"] else None,
+        employer_domain or (urlparse(normalized["job_url"]).hostname if normalized["job_url"] else None),
     )
     company_id = company["id"] if company else None
     if not company_id:
         company_id = await sql.fetchval(
             "INSERT INTO companies (name, domain, about) VALUES ($1, $2, $3) RETURNING id",
             normalized["company_name"],
-            urlparse(normalized["job_url"]).hostname if normalized["job_url"] else None,
+            employer_domain or (urlparse(normalized["job_url"]).hostname if normalized["job_url"] else None),
             normalized["about_company"][:500] if normalized["about_company"] else None,
         )
 
@@ -1086,11 +1090,28 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
 async def run_normalizer(
     redis_client: redis.Redis,
     db_pool: asyncpg.Pool,
+    concurrency: int | None = None,
 ) -> int:
     """Consume raw_leads_queue and normalize + persist leads.
 
-    Returns count of leads inserted (excluding deduped).
+    Runs N concurrent consumers. The per-lead HR-discovery cascade is network-bound
+    (~5s/lead: LinkedIn/whois/career-page), so a single consumer can't drain a
+    2000+ lead army backlog in reasonable time. Concurrency is bounded well under
+    the DB pool (max_size=10) so all stages keep working; the pool naturally
+    throttles it. Returns only after a worker errors (the loop is otherwise
+    infinite). Set NORMALIZER_CONCURRENCY to tune.
     """
+    n = concurrency or int(os.environ.get("NORMALIZER_CONCURRENCY", "5"))
+    n = max(1, min(n, 8))
+    await asyncio.gather(*[_normalize_worker(redis_client, db_pool) for _ in range(n)])
+    return 0
+
+
+async def _normalize_worker(
+    redis_client: redis.Redis,
+    db_pool: asyncpg.Pool,
+) -> int:
+    """One normalizer consumer. Multiple run concurrently (see run_normalizer)."""
     inserted = 0
     processed = 0
 
@@ -1125,6 +1146,7 @@ async def run_normalizer(
                 lead_id = await insert_lead(conn, normalized)
                 if lead_id:
                     inserted += 1
+                    await chain_lead(redis_client, "enrichment_queue:requests", lead_id, provider="auto", requested_by=normalized.get("requested_by", "system"))
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error in normalizer: {e}")
@@ -1167,6 +1189,7 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
                 lead_id = await insert_lead(conn, normalized)
                 if lead_id:
                     inserted += 1
+                    await chain_lead(redis_client, "enrichment_queue:requests", lead_id, provider="auto", requested_by=normalized.get("requested_by", "system"))
                 else:
                     deduped += 1
 

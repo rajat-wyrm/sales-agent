@@ -29,6 +29,7 @@ INDIA_NATIVE_SOURCES = {
     "naukri", "shine", "internshala", "freshersworld", "instahyre",
     "cutshort", "foundit", "adzuna", "jooble", "indeed", "workday",
     "unstop", "jobinsider", "iimjobs", "timesjobs",
+    "apna", "workindia", "hirist", "classicjobs",
 }
 
 # Strong positive India location signals.
@@ -113,3 +114,59 @@ def is_india_relevant(normalized: dict) -> bool:
 
     # 5. Global source, no positive India evidence → reject (fail closed).
     return False
+
+
+# ── Employer-domain derivation ────────────────────────────────────────────────
+# A job URL on an aggregator (apna.co, naukri.com, …) does NOT identify the
+# hiring employer: the host is the board. Using it as the company domain routes
+# every email/OSINT lookup to the job board instead of the real company — the
+# exact wrong answer for "find the HR who posted this". Only a company's own
+# site (ATS board, career page) yields a trustworthy employer domain.
+
+_JOB_BOARD_HOSTS = {
+    "naukri.com", "shine.com", "internshala.com", "freshersworld.com",
+    "instahyre.com", "cutshort.io", "foundit.in", "adzuna.com", "jooble.org",
+    "indeed.com", "indeed.co.in", "apna.co", "workindia.in", "hirist.in",
+    "hirist.tech", "classicjobs.in", "unstop.com", "iimjobs.com",
+    "jobinsider.in", "timesjobs.com", "glassdoor.co.in", "glassdoor.com",
+    "wellfound.com", "angel.co", "linkedin.com", "akunamatata.live",
+    "monster.com", "quikr.com", "jobs.quikr.com", "olx.in", "dice.com",
+    "ziprecruiter.com", "careerbuilder.com", "simplyhired.com",
+}
+_KNOWN_SUFFIXES = (
+    "co.in", "com", "in", "net", "org", "co", "io", "ai", "co.uk",
+    "tech", "info", "biz", "me", "app", "dev",
+)
+
+
+def registrable_domain(host: str) -> str:
+    """best-effort eTLD+1 from a hostname (no PSL dependency)."""
+    host = (host or "").lower().strip(".").replace("www.", "")
+    parts = host.split(".")
+    if len(parts) < 2:
+        return host
+    for n in (3, 2):
+        if len(parts) > n and ".".join(parts[-n:]) in _KNOWN_SUFFIXES:
+            if len(parts) > n + 1:
+                return ".".join(parts[-(n + 1):])
+            return host
+    return ".".join(parts[-2:])
+
+
+def derive_company_domain(company_name: str, job_url: str) -> str:
+    """Resolve the employer domain for enrichment, never the job-board host."""
+    host = ""
+    if job_url:
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(job_url).hostname or "").lower()
+        except Exception:
+            host = ""
+    if host:
+        reg = registrable_domain(host)
+        if reg and reg not in _JOB_BOARD_HOSTS:
+            return reg          # company's own site / ATS board → trustworthy
+    # Aggregator host or none → slug the company name (original heuristic,
+    # incl. dropping the Indian corporate suffixes pvt/ltd).
+    slug = re.sub(r"[^a-z0-9]", "", (company_name or "").lower().replace(" pvt", "").replace(" ltd", ""))
+    return f"{slug}.com" if slug else ""

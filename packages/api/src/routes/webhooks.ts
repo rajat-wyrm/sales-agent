@@ -4,17 +4,24 @@ import { z } from 'zod';
 import { getDB } from '../utils/db';
 import { env } from '../utils/env';
 import { logAuditEvent } from '../utils/audit';
+import { redactEmail, redactPhone } from '../utils/redact';
 
 // Verifies a svix-style signature header (Resend webhooks) or Meta X-Hub-Signature-256
 // against the raw request body. Rejects the request when a secret is configured but
 // the signature does not match; allows all traffic when no secret is configured (dev).
-function verifySignature(
+export function verifySignature(
   secret: string | undefined,
   headers: Record<string, string | string[] | undefined>,
   rawBody: string,
   scheme: 'svix' | 'meta',
 ): boolean {
-  if (!secret) return true; // ponytail: no secret configured -> dev mode; set RESEND_WEBHOOK_SECRET / WHATSAPP_APP_SECRET in prod
+  if (!secret) {
+    // Fail CLOSED whenever the secret is missing, regardless of NODE_ENV: an
+    // unconfigured webhook secret must never become a "trust anything" hole (an
+    // attacker could forge bounce/complaint events and poison the blocklist).
+    // Local dev/test opts in EXPLICITLY via ALLOW_UNSIGNED_WEBHOOKS=true.
+    return process.env.ALLOW_UNSIGNED_WEBHOOKS === 'true';
+  }
   const headerNames: Record<typeof scheme, { sig: string; id?: string; ts?: string }> = {
     svix: { sig: 'svix-signature', id: 'svix-id', ts: 'svix-timestamp' },
     meta: { sig: 'x-hub-signature-256' },
@@ -118,12 +125,23 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         [messageId],
       );
 
+      // Suppress the actual recipient across ALL leads (contact-level opt-out),
+      // not just this one lead — a bounced address must never be re-messaged.
+      if (recipient) {
+        await sql.unsafe(
+          `INSERT INTO suppressions (normalized_contact, channel, reason, source)
+           VALUES (lower($1), 'email', 'bounced', 'webhook')
+           ON CONFLICT (normalized_contact, channel) DO NOTHING`,
+          [String(recipient).trim().toLowerCase()],
+        );
+      }
+
       await logAuditEvent({
         user_id: null,
         action: 'email_bounced',
         resource_type: 'lead',
         resource_id: null,
-        details: { recipient, message_id: messageId },
+        details: { recipient: redactEmail(recipient), message_id: messageId },
       });
     }
 
@@ -141,12 +159,32 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         [recipient],
       );
 
+      // A spam complaint = explicit opt-out. Suppress this contact channel-wide
+      // so no future outreach reaches them (GDPR/DPDP + CAN-SPAM obligation).
+      if (recipient) {
+        await sql.unsafe(
+          `INSERT INTO suppressions (normalized_contact, channel, reason, source)
+           VALUES (lower($1), 'email', 'opted_out', 'webhook')
+           ON CONFLICT (normalized_contact, channel) DO NOTHING`,
+          [String(recipient).trim().toLowerCase()],
+        );
+        await sql.unsafe(
+          `UPDATE leads SET do_not_contact = true, pipeline_stage = 'suppressed'
+           WHERE id IN (
+             SELECT l.id FROM leads l
+             JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+             WHERE lower(hc.personal_email) = lower($1)
+           )`,
+          [recipient],
+        );
+      }
+
       await logAuditEvent({
         user_id: null,
         action: 'email_complaint',
         resource_type: 'lead',
         resource_id: null,
-        details: { recipient },
+        details: { recipient: redactEmail(recipient) },
       });
     }
 
@@ -172,7 +210,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         action: 'email_reply_received',
         resource_type: 'lead',
         resource_id: null,
-        details: { recipient, message_id: messageId },
+        details: { recipient: redactEmail(recipient), message_id: messageId },
       });
     }
 
@@ -224,7 +262,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
                   action: 'whatsapp_message_received',
                   resource_type: 'lead',
                   resource_id: leadResult?.[0]?.id || null,
-                  details: { from, message: msgBody },
+                  details: { from: redactPhone(from), message_length: (msgBody || '').length },
                 });
               }
             }

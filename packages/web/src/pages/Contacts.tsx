@@ -93,11 +93,6 @@ const Contacts: React.FC = () => {
     onError: (err) => toast({ title: 'Failed to delete contact', description: (err as Error).message, variant: 'error' }),
   });
 
-  if (isLoading) return <PageLoader label="Loading contacts..." />;
-
-  if (isError)
-    return <ErrorState title="Failed to load contacts" message={(error as Error).message} onRetry={() => refetch()} />;
-
   const contactData = (data as any) ?? { data: [], pagination: { page: 1, limit: 50, total: 0, pages: 0 } };
   const contacts: HRContact[] = contactData.data || [];
 
@@ -259,6 +254,12 @@ const Contacts: React.FC = () => {
     setFormData(EMPTY_FORM);
     setShowForm(true);
   };
+
+  // Early returns must come after every hook (see Companies note) — otherwise
+  // the hook count changes between loading/data renders and the page crashes.
+  if (isLoading) return <PageLoader label="Loading contacts..." />;
+  if (isError)
+    return <ErrorState title="Failed to load contacts" message={(error as Error).message} onRetry={() => refetch()} />;
 
   return (
     <div className="space-y-4">

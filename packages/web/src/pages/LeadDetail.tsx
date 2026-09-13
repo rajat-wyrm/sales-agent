@@ -36,9 +36,9 @@ import {
 } from 'lucide-react';
 import {
   SCORE_BAND_META,
-  STAGE_META,
-  EMAIL_STATUS_META,
-  WHATSAPP_STATUS_META,
+  stageMeta,
+  emailStatusMeta,
+  whatsappStatusMeta,
   DATA_QUALITY_META,
   formatDateTime,
 } from '@/lib/format';
@@ -83,6 +83,10 @@ const LeadDetail: React.FC = () => {
   } = useQuery(['lead', id], () => leadsApi.get(id!), { enabled: !!id });
 
   const { data: timelineData } = useQuery(['lead-timeline', id], () => leadsApi.timeline(id!), {
+    enabled: !!id,
+  });
+
+  const { data: scoreData } = useQuery(['lead-score', id], () => leadsApi.scoreExplanation(id!), {
     enabled: !!id,
   });
 
@@ -204,9 +208,9 @@ const LeadDetail: React.FC = () => {
 
   const assignedUser = users.find((u: any) => u.id === lead.assigned_to);
   const bandMeta = SCORE_BAND_META[lead.score_band];
-  const stageMeta = STAGE_META[lead.pipeline_stage];
-  const emailMeta = EMAIL_STATUS_META[lead.email_status ?? 'unknown'];
-  const waMeta = WHATSAPP_STATUS_META[lead.whatsapp_status ?? 'unknown'];
+  const stageMetaV = stageMeta(lead.pipeline_stage);
+  const emailMeta = emailStatusMeta(lead.email_status);
+  const waMeta = whatsappStatusMeta(lead.whatsapp_status);
   const dqMeta = DATA_QUALITY_META[lead.data_quality];
 
   const providerNote =
@@ -219,7 +223,7 @@ const LeadDetail: React.FC = () => {
           : null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-phi4">
       <div>
         <Link to="/leads" className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground">
           <ArrowLeft className="h-4 w-4" />
@@ -234,8 +238,8 @@ const LeadDetail: React.FC = () => {
                   <Badge className={bandMeta.className}>
                     Score {lead.lead_score} · {bandMeta.label}
                   </Badge>
-                  <Badge className={stageMeta.className}>
-                    <span className="capitalize">{stageMeta.label}</span>
+                  <Badge className={stageMetaV.className}>
+                    <span className="capitalize">{stageMetaV.label}</span>
                   </Badge>
                   {lead.do_not_contact && (
                     <Badge variant="danger">
@@ -348,7 +352,7 @@ const LeadDetail: React.FC = () => {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-phi3 lg:grid-cols-3">
         <Card className="lg:col-span-1">
           <CardHeader>
             <CardTitle>Lead Info</CardTitle>
@@ -394,6 +398,29 @@ const LeadDetail: React.FC = () => {
             )}
           </CardContent>
         </Card>
+
+        {/* Deterministic score explanation — no black-box number. */}
+        {scoreData && Object.keys(scoreData.breakdown || {}).length > 0 && (
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" />Why this score</span>
+                <span className="text-gradient text-lg font-semibold tabular-nums">{scoreData.score}</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-1.5 text-[13px]">
+                {Object.values(scoreData.breakdown).filter(Boolean).map((b: any) => (
+                  <li key={b.reason} className="flex items-center justify-between gap-3">
+                    <span className="text-muted-foreground">{b.reason}</span>
+                    <span className="font-medium tabular-nums text-success">+{b.points}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-3 text-[11px] text-muted-foreground/70">Score is deterministic from these fields; re-verifying or enriching updates it.</p>
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="lg:col-span-2">
           <CardHeader>

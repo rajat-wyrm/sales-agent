@@ -24,8 +24,10 @@ import redis.asyncio as redis
 import asyncpg
 
 from .utils.db import get_db_pool, close_db_pool
-from .queue import dequeue_job, run_queue_consumer
+from .queue import dequeue_job, run_queue_consumer, chain_lead
 from .api_utils.scoring_client import recompute_lead_score
+
+from .utils.redact import redact_email
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +159,11 @@ async def run_osint_enrichment(
                 result["hr_email"] = best["email"]
                 result["method"] = "github_commit_verified"
                 result["confidence_score"] = max(result["confidence_score"], 30 + int(0.9 * 40))
-                logger.info(f"OSINT: GitHub-verified email {best['email']}")
+                logger.info(f"OSINT: GitHub-verified email {redact_email(best['email'])}")
             elif gh.get("pattern"):
                 logger.info(f"OSINT: GitHub learned pattern {gh['pattern']!r} for {domain}")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"GitHub email mining failed for {hr_name}@{domain}: {e}")
+            logger.warning(f"GitHub email mining failed for {redact_email(hr_name)}@{domain}: {e}")
 
     # Pattern-guess fallback (learns real format from known_company_emails above).
     if hr_name and domain and not result.get("hr_email"):
@@ -180,7 +182,7 @@ async def run_osint_enrichment(
                     f"(conf {found['confidence']}, {found['method']})"
                 )
         except Exception as e:
-            logger.warning(f"OSINT email discovery failed for {hr_name}@{domain}: {e}")
+            logger.warning(f"OSINT email discovery failed for {redact_email(hr_name)}@{domain}: {e}")
 
     # Tier 2a-fallback: multi-engine SERP email-exposure dorking — a published
     # `name@company.com` in an indexed page (roster/PDF/directory) beats a
@@ -199,7 +201,7 @@ async def run_osint_enrichment(
                     f"OSINT: SERP-exposed email {sd['email']} (conf {sd['confidence']})"
                 )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"SERP email dork failed for {hr_name}@{domain}: {e}")
+            logger.warning(f"SERP email dork failed for {redact_email(hr_name)}@{domain}: {e}")
 
     # Tier 2b: cert-transparency (crt.sh) + Wayback archival harvest — both key-
     # free public OSINT. crt.sh leaks addresses from cert subjects/SANs and often
@@ -216,7 +218,7 @@ async def run_osint_enrichment(
                 if harvested:
                     break
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"crt.sh/Wayback harvest skipped for {domain}: {e}")
+            logger.debug(f"OSINT email harvest skipped for {domain}: {e}")
         harvested = [e for e in harvested if e and "@" in e]
         # (a) enrich the pattern-inference corpus with any new real addresses
         known_company_emails = list(dict.fromkeys(known_company_emails + harvested))
@@ -257,7 +259,7 @@ async def run_osint_enrichment(
                 if g.get("hr_name") and not result.get("hr_name"):
                     result["hr_name"] = g["hr_name"]
                 result["confidence_score"] = min(95, max(result["confidence_score"], 60) + 10)
-                logger.info(f"OSINT: Gravatar confirms {result['hr_email']} (+10 conf)")
+                logger.info(f"OSINT: Gravatar confirms {redact_email(result['hr_email'])} (+10 conf)")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Gravatar lookup skipped: {e}")
 
@@ -273,10 +275,10 @@ async def run_osint_enrichment(
                 if not result.get("hr_email"):
                     result["hr_email"] = email
                 result["confidence_score"] = max(result["confidence_score"], 55)
-                logger.info(f"OSINT: holehe validated {email}")
+                logger.info(f"OSINT: holehe validated {redact_email(email)}")
                 break
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"holehe check failed for {email}: {e}")
+            logger.warning(f"holehe check failed for {redact_email(email)}: {e}")
 
     # Tier 4 (last resort): PAID waterfall — only when every free tier above
     # failed to find a personal email, and only vendors whose key is configured.
@@ -309,7 +311,7 @@ async def run_osint_enrichment(
                     f"(verified={paid.get('verified')})"
                 )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Paid email waterfall failed for {hr_name}@{domain}: {e}")
+            logger.warning(f"Paid email waterfall failed for {redact_email(hr_name)}@{domain}: {e}")
 
     return result
 
@@ -431,7 +433,12 @@ async def process_enrichment_job(
         if (
             not enrichment_result or not enrichment_result.get("hr_email")
         ) and provider in ("contactout", "auto"):
-            contactout_key = api_keys.get("contactout") or os.environ.get("ACCONTACT_OUT_API_KEY")
+            contactout_key = (
+                api_keys.get("contactout")
+                or os.environ.get("CONTACT_OUT_API_KEY")
+                or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
+                or os.environ.get("ACCONTOUT_API_KEY")
+            )
             if contactout_key and hr_linkedin:
                 result = await call_contactout(hr_linkedin, contactout_key)
                 if result:
@@ -556,10 +563,21 @@ async def process_enrichment_job(
                         lead_id,
                     )
 
-        # Update pipeline stage
+        # Update pipeline stage. Deterministic lifecycle: a lead whose full
+        # enrichment army found NO usable contact is marked 'contact_unavailable'
+        # (never a fabricated contact), and is still picked up by the daily
+        # re-enrichment sweep. Only leads with a real contact advance to verify.
+        has_contact = bool(
+            enrichment_result and (
+                enrichment_result.get("hr_email")
+                or enrichment_result.get("hr_mobile")
+                or enrichment_result.get("hr_linkedin_url")
+            )
+        )
         await conn.execute(
-            "UPDATE leads SET pipeline_stage = 'enriched', updated_at = NOW() WHERE id = $1",
+            "UPDATE leads SET pipeline_stage = $2, updated_at = NOW() WHERE id = $1",
             lead_id,
+            "enriched" if has_contact else "contact_unavailable",
         )
 
     # Recompute lead score
@@ -578,6 +596,16 @@ async def process_enrichment_job(
     )
 
     logger.info(f"Enrichment complete for lead {lead_id}: provider={used_provider}, status={status}")
+
+    # Chain to verification only when a real contact exists. No-contact leads are
+    # parked as 'contact_unavailable' and retried by the sweep — we never fabricate
+    # a contact nor spend a verification call on an empty target.
+    if enrichment_result and (
+        enrichment_result.get("hr_email")
+        or enrichment_result.get("hr_mobile")
+    ):
+        await chain_lead(redis_client, "verification_queue:requests", lead_id,
+                         requested_by=requested_by)
 
 
 async def handle_enrichment_job(payload: dict[str, Any], redis_client: redis.Redis, db_pool: asyncpg.Pool) -> None:

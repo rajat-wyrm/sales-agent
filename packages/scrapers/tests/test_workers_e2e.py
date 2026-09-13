@@ -50,7 +50,14 @@ async def _seed_lead(pool):
 
 def _stub_network(monkeypatch):
     async def ok(*a, **k):
+        # Email vocabulary: valid|invalid|catch_all|disposable|unknown|expired|pending
         return {"status": "valid", "raw": {"provider": "stub"}}
+
+    async def ok_wa(*a, **k):
+        # WhatsApp vocabulary is DISTINCT: registered|not_registered|unknown|expired|pending.
+        # (An earlier stub returned "valid" here, which the DB CHECK now correctly
+        # rejects — discovery/verification vocabularies must not be conflated.)
+        return {"status": "registered", "raw": {"provider": "stub"}}
 
     async def sent(*a, **k):
         return {"status": "sent", "provider_message_id": "msg_stub"}
@@ -64,7 +71,7 @@ def _stub_network(monkeypatch):
     dw = importlib.import_module("scrapers.draft_worker")
     for m in (vw, vsw):
         monkeypatch.setattr(m, "verify_email_reacher", ok)
-        monkeypatch.setattr(m, "verify_whatsapp", ok)
+        monkeypatch.setattr(m, "verify_whatsapp", ok_wa)
     for m in (sw, vsw):
         monkeypatch.setattr(m, "send_email", sent)
         monkeypatch.setattr(m, "send_whatsapp", sent)

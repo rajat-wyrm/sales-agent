@@ -25,6 +25,9 @@ import asyncpg
 
 from .utils.db import get_db_pool
 from .api_utils.scoring_client import recompute_lead_score
+from .queue import chain_lead
+
+from .utils.redact import redact_email, redact_phone
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,7 @@ async def verify_email_reacher(email: str, reacher_url: str | None = None) -> di
         logger.warning(f"Reacher not reachable at {url}")
         return {"status": "unknown", "raw": {"error": "connection_failed"}}
     except Exception as e:
-        logger.warning(f"Reacher verification failed for {email}: {e}")
+        logger.warning(f"Reacher verification failed for {redact_email(email)}: {e}")
         return {"status": "unknown", "raw": {"error": str(e)}}
 
 
@@ -109,7 +112,7 @@ async def verify_whatsapp(
             status = "registered" if exists else "not_registered"
             return {"status": status, "raw": data}
     except Exception as e:
-        logger.error(f"WhatsApp verification failed for {phone}: {e}")
+        logger.error(f"WhatsApp verification failed for {redact_phone(phone)}: {e}")
         return {"status": "unknown", "raw": {"error": str(e)}}
 
 
@@ -183,16 +186,26 @@ async def process_verification_job(
                 json.dumps(result["raw"]),
             )
 
+        # Lifecycle correctness: 'verified' is only set when a channel genuinely
+        # verified as reachable. A lead whose only contact verified as bad (invalid
+        # email / not-registered / no contact) is 'verification_failed' — it must
+        # NEVER silently read as 'verified'. Discovery and verification stay
+        # distinct states per spec.
+        email_ok = email_status in ("valid", "catch_all")
+        wa_ok = whatsapp_status == "registered"
+        new_stage = "verified" if (email_ok or wa_ok) else "verification_failed"
+
         # Update lead
         await conn.execute(
             """
             UPDATE leads
             SET email_status = $1, whatsapp_status = $2,
-                pipeline_stage = 'verified', updated_at = NOW()
-            WHERE id = $3
+                pipeline_stage = $3, updated_at = NOW()
+            WHERE id = $4
             """,
             email_status,
             whatsapp_status,
+            new_stage,
             lead_id,
         )
 
@@ -210,6 +223,13 @@ async def process_verification_job(
     )
 
     logger.info(f"Verification complete for lead {lead_id}: email={email_status}, whatsapp={whatsapp_status}")
+
+    # Chain to drafting only for deliverable contacts. DRAFT-ONLY mode: nothing
+    # here ever pushes to send_queue — sending to a real HR is always a manual
+    # human action via the API.
+    if email_status in ("valid", "catch_all"):
+        await chain_lead(redis_client, "draft_queue:requests", lead_id,
+                         requested_by=requested_by)
 
 
 async def consume_verification_queue(

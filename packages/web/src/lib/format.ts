@@ -99,7 +99,31 @@ export const STAGE_META: Record<PipelineStage, { label: string; className: strin
   contacted: { label: 'Contacted', className: 'bg-primary-soft text-primary border-primary/20' },
   replied: { label: 'Replied', className: 'bg-success-soft text-success border-success/20' },
   bounced: { label: 'Bounced', className: 'bg-destructive-soft text-destructive border-destructive/20' },
+  contact_unavailable: { label: 'Contact unavailable', className: 'bg-warning-soft text-warning border-warning/20' },
+  suppressed: { label: 'Suppressed', className: 'bg-destructive-soft text-destructive border-destructive/20' },
+  send_failed: { label: 'Send failed', className: 'bg-destructive-soft text-destructive border-destructive/20' },
+  provider_error: { label: 'Provider error', className: 'bg-destructive-soft text-destructive border-destructive/20' },
+  retry_pending: { label: 'Retry pending', className: 'bg-muted text-muted-foreground border-border' },
 };
+
+// Never let an unknown/unmapped backend stage crash the UI: fall back to a
+// readable label + neutral style instead of undefined.className.
+export function stageMeta(stage?: string | null): { label: string; className: string } {
+  return (STAGE_META as Record<string, { label: string; className: string }>)[stage ?? ''] ?? {
+    label: (stage || 'unknown').replace(/_/g, ' '),
+    className: 'bg-muted text-muted-foreground border-border',
+  };
+}
+
+export function emailStatusMeta(s?: string | null): { label: string; className: string } {
+  const map = EMAIL_STATUS_META as Record<string, { label: string; className: string }>;
+  return map[s ?? 'null'] ?? map['null'];
+}
+
+export function whatsappStatusMeta(s?: string | null): { label: string; className: string } {
+  const map = WHATSAPP_STATUS_META as Record<string, { label: string; className: string }>;
+  return map[s ?? 'null'] ?? map['null'];
+}
 
 export const EMAIL_STATUS_META: Record<Exclude<EmailStatus, null> | 'null', { label: string; className: string }> = {
   valid: { label: 'Email valid', className: 'bg-success-soft text-success border-success/20' },
@@ -107,6 +131,7 @@ export const EMAIL_STATUS_META: Record<Exclude<EmailStatus, null> | 'null', { la
   catch_all: { label: 'Catch-all', className: 'bg-warning-soft text-warning border-warning/20' },
   disposable: { label: 'Disposable', className: 'bg-warning-soft text-warning border-warning/20' },
   unknown: { label: 'Email unknown', className: 'bg-muted text-muted-foreground border-border' },
+  expired: { label: 'Re-verify required', className: 'bg-warning-soft text-warning border-warning/20' },
   null: { label: 'Not verified', className: 'bg-muted text-muted-foreground border-border' },
 };
 
@@ -117,6 +142,7 @@ export const WHATSAPP_STATUS_META: Record<Exclude<WhatsAppStatus, null> | 'null'
     className: 'bg-destructive-soft text-destructive border-destructive/20',
   },
   unknown: { label: 'WhatsApp unknown', className: 'bg-muted text-muted-foreground border-border' },
+  expired: { label: 'Re-verify required', className: 'bg-warning-soft text-warning border-warning/20' },
   null: { label: 'Not verified', className: 'bg-muted text-muted-foreground border-border' },
 };
 

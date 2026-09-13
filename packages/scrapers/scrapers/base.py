@@ -370,23 +370,37 @@ class BaseScraper(abc.ABC):
                 self._logger.error(f"Scrape failed for {self.source_name}: {e}")
                 return []
 
-    async def enqueue_leads(self, leads: list[dict[str, Any]]):
-        """Push raw lead dicts to the raw_leads_queue Redis list."""
+    async def enqueue_leads(self, leads: list[dict[str, Any]], requested_by: str | None = None):
+        """Push raw lead dicts to the raw_leads_queue Redis list.
+
+        Stamps the triggering user (from the scrape job) onto each lead so the
+        downstream auto-chain can publish progress to that user's SSE channel.
+        """
         if not self._redis:
             self._logger.warning("No Redis connection, skipping enqueue")
             return
 
-        for lead in leads:
-            await self._redis.lpush(
-                "raw_leads_queue:requests",
-                json.dumps(lead),
-            )
+        # One lpush per lead is 2490 sequential Redis round-trips on a full-fleet
+        # run (measured: the /army trigger looked like a hang). A single pipelined
+        # batch does them all in one round-trip. Cap the batch so a huge scrape
+        # doesn't build one enormous multi-MB pipeline.
+        if not leads:
+            return
+        CHUNK = 500
+        for i in range(0, len(leads), CHUNK):
+            pipe = self._redis.pipeline()
+            for lead in leads[i:i + CHUNK]:
+                if requested_by:
+                    lead["requested_by"] = requested_by
+                pipe.lpush("raw_leads_queue:requests", json.dumps(lead))
+            await pipe.execute()
 
-    async def scrape_and_enqueue(self) -> int:
+
+    async def scrape_and_enqueue(self, requested_by: str | None = None) -> int:
         """Convenience: scrape + enqueue + return count."""
         leads = await self.run()
         if leads:
-            await self.enqueue_leads(leads)
+            await self.enqueue_leads(leads, requested_by=requested_by)
         return len(leads)
 
 

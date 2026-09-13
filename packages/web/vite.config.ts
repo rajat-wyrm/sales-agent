@@ -27,11 +27,15 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    // Route-level React.lazy in App.tsx already defers recharts + the table lib
+    // into their route chunks (loaded only when that route opens). Forcing them
+    // into GLOBAL manualChunks would re-hoist them into the entry's preload list,
+    // so we ONLY split truly-shared framework code here.
     rollupOptions: {
       output: {
         manualChunks: {
-          vendor: ['react', 'react-dom'],
-          table: ['@tanstack/react-table'],
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+          state: ['zustand'],
         },
       },
     },

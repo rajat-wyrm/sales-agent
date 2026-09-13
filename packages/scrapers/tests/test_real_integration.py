@@ -23,7 +23,7 @@ import os
 DB_URL = os.environ.get("DB_URL", "postgresql://postgres:postgres@localhost:5432/leads_db")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-SCHEMA_PATH = "/home/rajat/Downloads/sales-agent/packages/api/migrations/manual_schema.sql"
+SCHEMA_DIR = "/home/rajat/Downloads/sales-agent/packages/api/database/schema"
 
 
 class TestPostgresIntegration:
@@ -40,10 +40,74 @@ class TestPostgresIntegration:
                 "leads", "job_postings", "companies", "hr_contacts",
                 "outreach_drafts", "audit_log", "scrape_runs", "source_health",
                 "settings", "users", "enrichment_log", "verification_log",
-                "outreach_log",
+                "outreach_log", "suppressions", "daily_runs",
             }
             missing = required - table_names
             assert not missing, f"Missing tables: {missing}. Found: {table_names}"
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_check_constraint_is_enforced(self, db_pool):
+        """Regression: the schema loader must APPLY the DO-block CHECKs.
+
+        The old test loader split SQL on ';' and silently skipped the
+        `DO $$ ... $$;` blocks, so these invariants were never exercised in
+        tests. Assert a valid stage inserts and an impossible stage is rejected
+        at the DB level (not just app level).
+        """
+        async with db_pool.acquire() as conn:
+            company_id = await conn.fetchval(
+                "INSERT INTO companies (name, domain) VALUES ('ChkCorp','chk.com') RETURNING id"
+            )
+
+            async def make_lead(stage):
+                jp = await conn.fetchval(
+                    "INSERT INTO job_postings (company_id, title, job_url, source_site, fingerprint) "
+                    "VALUES ($1,'T','http://c/1','test', $2) RETURNING id",
+                    company_id, "chk-" + uuid.uuid4().hex[:8],
+                )
+                return await conn.execute(
+                    "INSERT INTO leads (job_posting_id, company_id, pipeline_stage) "
+                    "VALUES ($1,$2,$3)", jp, company_id, stage,
+                )
+
+            # A real lifecycle state (incl. a failure state) must be accepted.
+            await make_lead("contact_unavailable")
+            await make_lead("verification_failed")
+
+            # An impossible stage must be rejected by the DB CHECK, not the app.
+            with pytest.raises(Exception):
+                await make_lead("definitely_not_a_real_stage")
+
+            # A guessed "verified-looking" email_status outside the vocabulary is rejected.
+            with pytest.raises(Exception):
+                await conn.execute(
+                    "UPDATE leads SET email_status = 'looks_good' WHERE job_posting_id IS NOT NULL"
+                )
+
+    @pytest.mark.asyncio
+    async def test_lead_score_range_enforced(self, db_pool):
+        async with db_pool.acquire() as conn:
+            cid = await conn.fetchval("INSERT INTO companies (name) VALUES ('ScoreCo') RETURNING id")
+            async def mk(score):
+                jp = await conn.fetchval(
+                    "INSERT INTO job_postings (company_id,title,job_url,source_site,fingerprint) "
+                    "VALUES ($1,'T','http://s/1','test', $2) RETURNING id", cid, "sc-" + uuid.uuid4().hex[:8])
+                await conn.execute("INSERT INTO leads (job_posting_id, company_id, lead_score) VALUES ($1,$2,$3)", jp, cid, score)
+            await mk(85)
+            for bad in (-1, 101):
+                with pytest.raises(Exception):
+                    await mk(bad)
+
+    @pytest.mark.asyncio
+    async def test_updated_at_trigger_maintains_freshness(self, db_pool):
+        """The set_updated_at() trigger must auto-bump updated_at on UPDATE, so
+        freshness never depends on a caller remembering to set it."""
+        async with db_pool.acquire() as conn:
+            cid = await conn.fetchval("INSERT INTO companies (name) VALUES ('TrigCo') RETURNING id")
+            before = await conn.fetchval("SELECT updated_at FROM companies WHERE id=$1", cid)
+            await conn.execute("UPDATE companies SET about='hello' WHERE id=$1", cid)
+            after = await conn.fetchval("SELECT updated_at FROM companies WHERE id=$1", cid)
+            assert after > before
 
     @pytest.mark.asyncio
     async def test_dedup_30_day_window_rejects_recent_duplicate(self, db_pool):
@@ -294,4 +358,16 @@ async def test_process_enrichment_job_sentinel_runs_end_to_end(db_pool, redis_cl
             "SELECT pipeline_stage FROM leads WHERE id = $1", lead_id)
     assert log is not None, "enrichment_log row must be written"
     assert log["requested_by"] is None, "sentinel requester must store NULL, not crash"
-    assert stage == "enriched", "pipeline_stage must advance to enriched"
+    # Every enrichment provider is stubbed to return nothing here, so the army
+    # legitimately finds no contact. The correct, non-fabricating lifecycle
+    # outcome is 'contact_unavailable' (NOT a fake 'enriched'), and the lead must
+    # not be chained to verification. It stays eligible for the daily re-enrichment
+    # sweep (whose filter excludes only 'contacted').
+    assert stage == "contact_unavailable", (
+        "lead with no discoverable contact must be contact_unavailable, never fabricated"
+    )
+
+    # No-contact lead must NOT be chained to verification (no fabricated target).
+    # (The queue may hold unrelated items from other tests; the contract is the
+    #  stage above — a contact_unavailable lead never advances.)
+

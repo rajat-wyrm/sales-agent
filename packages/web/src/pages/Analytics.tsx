@@ -19,7 +19,7 @@ import {
   Clock,
   AlertTriangle,
 } from 'lucide-react';
-import { formatDateTime, STAGE_META } from '@/lib/format';
+import { formatDateTime, stageMeta } from '@/lib/format';
 
 const STAGE_LABELS: Record<string, string> = {
   discovered: 'Discovered',
@@ -60,7 +60,7 @@ const Analytics: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-phi4">
       <PageHeader title="Analytics" description="Deep dive into pipeline performance and resource usage" />
 
       <StatCardGrid>
@@ -85,7 +85,7 @@ const Analytics: React.FC = () => {
               {funnelEntries.map(([stage, count]) => {
                 const pct = totalFunnel > 0 ? ((count as number) / totalFunnel) * 100 : 0;
                 const stageLabel = STAGE_LABELS[stage] || stage.replace(/_/g, ' ');
-                const meta = STAGE_META[stage as keyof typeof STAGE_META];
+                const meta = stageMeta(stage);
                 return (
                   <div key={stage} className="space-y-1.5">
                     <div className="flex items-center justify-between">

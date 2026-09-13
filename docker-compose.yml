@@ -26,8 +26,8 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./packages/api/migrations:/migrations
-    entrypoint: ["sh", "-c", "PGPASSWORD=postgres psql -h postgres -U postgres -c 'CREATE DATABASE n8n' 2>/dev/null || true; PGPASSWORD=postgres psql -h postgres -U postgres -d leads_db -v ON_ERROR_STOP=1 -f /migrations/manual_schema.sql"]
+      - ./packages/api/database:/db
+    entrypoint: ["sh", "-c", "PGPASSWORD=postgres psql -h postgres -U postgres -c 'CREATE DATABASE n8n' 2>/dev/null || true; DATABASE_URL=postgresql://postgres:postgres@postgres:5432/leads_db sh /db/utils/apply_schema.sh"]
 
   redis:
     image: redis:7-alpine
@@ -47,6 +47,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/leads_db
       REDIS_URL: redis://redis:6379
       HOST: 0.0.0.0
+      WORKERS_URL: http://workers:8000
     depends_on:
       - postgres
       - redis

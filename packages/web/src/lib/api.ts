@@ -120,6 +120,14 @@ export const leads = {
     const res = await api.post(`/leads/${id}/verify-and-send`, { channel, draft_id: draftId });
     return res.data;
   },
+  scoreExplanation: async (id: string) => {
+    const res = await api.get(`/leads/${id}/score`);
+    return res.data as {
+      score: number;
+      band: string;
+      breakdown: Record<string, { points: number; reason: string } | undefined>;
+    };
+  },
   timeline: async (id: string) => {
     const res = await api.get(`/leads/${id}/timeline`);
     return res.data;
@@ -257,6 +265,14 @@ export const admin = {
   triggerRun: async (sources?: string[]) => {
     const res = await api.post('/runs/trigger', { sources });
     return res.data;
+  },
+  runArmy: async () => {
+    const res = await api.post('/runs/army', {});
+    return res.data;
+  },
+  armyStatus: async () => {
+    const res = await api.get('/army/status');
+    return res.data as { raw: number; enrichment: number; verification: number; draft: number };
   },
   getRun: async (id: string) => {
     const res = await api.get(`/runs/${id}`);

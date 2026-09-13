@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuthStore } from "@/stores/auth";
 import { admin } from "@/lib/api";
-import { Bell, Menu, CheckCircle2, Loader2, XCircle, ChevronDown } from "lucide-react";
+import { Bell, Menu, CheckCircle2, Loader2, XCircle, ChevronDown, Search } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/components/ui/cn";
 import { formatDateTime } from "@/lib/format";
@@ -91,7 +91,7 @@ const Header = ({ onMenuClick }: { onMenuClick?: () => void }) => {
       </button>
 
       <div className="min-w-0">
-        <p className="text-[15px] font-semibold tracking-tight text-foreground sm:text-base">
+        <p className="text-gradient text-[15px] font-semibold tracking-tight sm:text-base">
           {title}
         </p>
         <p className="hidden text-xs text-muted-foreground sm:block">
@@ -100,6 +100,16 @@ const Header = ({ onMenuClick }: { onMenuClick?: () => void }) => {
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new Event('hiregen:open-palette'))}
+          className="mr-1 hidden items-center gap-2 rounded-lg border border-border bg-surface/60 px-2.5 py-1.5 text-[13px] text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground sm:flex"
+          aria-label="Open command palette"
+        >
+          <Search className="h-3.5 w-3.5" />
+          <span>Search…</span>
+          <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">⌘K</kbd>
+        </button>
         {isAdmin && (
           <div className="relative" ref={notifRef}>
             <button

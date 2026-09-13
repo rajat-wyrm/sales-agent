@@ -140,7 +140,7 @@ Or let n8n run it on a cron schedule.
 ```bash
 docker compose exec postgres psql -U postgres -d leads_db   # interactive SQL
 ```
-Schema is auto-applied on every `./up.sh` from `packages/api/migrations/manual_schema.sql` (idempotent, `IF NOT EXISTS`). **That file is the source of truth** — append new tables/columns there.
+Schema is auto-applied on every `./up.sh` from `packages/api/database/schema/` (idempotent, `IF NOT EXISTS`), organized by concern: `schema/tables/`, `schema/constraints/`, `schema/functions/`, `schema/triggers/`, `schema/indexes/` (applied in that dependency order by `database/utils/apply_schema.sh`). **That folder is the source of truth** — add new tables/columns/indexes/constraints to the matching file there. For an already-deployed prod DB, forward-only deltas go in `database/migrations/` (run via `npm run migrate`).
 
 ---
 
@@ -185,7 +185,7 @@ packages/
                                contacts, dashboard, admin, webhooks, ws)
   web/                       ← React CRM (src/pages: Dashboard, Leads, …)
   scrapers/                  ← Python scraper fleet + workers
-  api/migrations/            ← manual_schema.sql = canonical DB schema
+  api/database/              ← schema/ + migrations/ = canonical DB (see its README.md)
   n8n/workflows/             ← n8n workflow definitions
 docs/                        ← SRS, compliance gate, traceability matrix
 .github/workflows/ci.yml     ← CI: tests + image builds (ghcr.io)

@@ -92,17 +92,6 @@ const Companies: React.FC = () => {
     onError: (err) => toast({ title: 'Failed to delete company', description: (err as Error).message, variant: 'error' }),
   });
 
-  if (isLoading) return <PageLoader label="Loading companies..." />;
-
-  if (isError)
-    return (
-      <ErrorState
-        title="Failed to load companies"
-        message={(error as Error).message}
-        onRetry={() => refetch()}
-      />
-    );
-
   const companyData = (data as any) ?? { data: [], pagination: { page: 1, limit: 50, total: 0, pages: 0 } };
   const companies: Company[] = companyData.data || [];
 
@@ -242,6 +231,20 @@ const Companies: React.FC = () => {
     setFormData(EMPTY_FORM);
     setShowForm(true);
   };
+
+  // NOTE: these early returns must stay BELOW every hook (useMemo/useReactTable).
+  // Returning before those hooks made the hook count differ between the loading
+  // render (0 table hooks) and the data render (all table hooks), throwing React's
+  // "Rendered more hooks than during the previous render" and blanking the page.
+  if (isLoading) return <PageLoader label="Loading companies..." />;
+  if (isError)
+    return (
+      <ErrorState
+        title="Failed to load companies"
+        message={(error as Error).message}
+        onRetry={() => refetch()}
+      />
+    );
 
   return (
     <div className="space-y-4">

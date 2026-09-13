@@ -30,6 +30,8 @@ const envSchema = z.object({
   SCRAPER_RETRY_ATTEMPTS: z.string().transform(Number).default('3'),
   CIRCUIT_BREAKER_FAILURE_THRESHOLD: z.string().transform(Number).default('5'),
   CIRCUIT_BREAKER_COOLDOWN_MINUTES: z.string().transform(Number).default('120'),
+  ADMIN_EMAIL: z.string().optional(),
+  ADMIN_PASSWORD: z.string().optional(),
 });
 
 type Env = z.infer<typeof envSchema>;

@@ -80,6 +80,48 @@ export function calculateLeadScore(input: LeadScoreInput): ScoreResult {
   return { score, breakdown, band };
 }
 
+// Read-only score explanation: same inputs as recomputeLeadScore but performs
+// NO write. Returns the deterministic breakdown so the UI can show WHY a lead
+// scored what it did ("verified HR email +25, missing salary -3", …) instead of
+// an unexplained black-box number.
+export async function scoreExplain(
+  sql: postgres.Sql,
+  leadId: string,
+): Promise<ScoreResult | null> {
+  const rows = await sql.unsafe(
+    `SELECT
+       hc.full_name as hr_name,
+       hc.personal_email as hr_personal_email,
+       hc.personal_mobile as hr_personal_mobile,
+       hc.linkedin_url as hr_linkedin_url,
+       c.default_email as company_default_email,
+       c.default_phone as company_default_phone,
+       jp.salary_range, jp.description as job_description, jp.job_url,
+       l.email_status, l.whatsapp_status
+     FROM leads l
+     JOIN companies c ON l.company_id = c.id
+     LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+     JOIN job_postings jp ON l.job_posting_id = jp.id
+     WHERE l.id = $1`,
+    [leadId],
+  );
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0]!;
+  return calculateLeadScore({
+    hr_name: row.hr_name as string | null | undefined,
+    hr_personal_email: row.hr_personal_email as string | null | undefined,
+    hr_personal_mobile: row.hr_personal_mobile as string | null | undefined,
+    hr_linkedin_url: row.hr_linkedin_url as string | null | undefined,
+    company_default_email: row.company_default_email as string | null | undefined,
+    company_default_phone: row.company_default_phone as string | null | undefined,
+    salary_range: row.salary_range as string | null | undefined,
+    job_description: row.job_description as string | null | undefined,
+    job_url: row.job_url as string | null | undefined,
+    email_status: row.email_status as string | null | undefined,
+    whatsapp_status: row.whatsapp_status as string | null | undefined,
+  });
+}
+
 export async function recomputeLeadScore(
   sql: postgres.Sql,
   leadId: string,

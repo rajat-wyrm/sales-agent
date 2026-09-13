@@ -4,7 +4,7 @@ import { getDB } from '../utils/db';
 import { getRedis } from '../utils/redis';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
-import { recomputeLeadScore } from '../utils/scoring';
+import { recomputeLeadScore, scoreExplain } from '../utils/scoring';
 import { logAuditEvent } from '../utils/audit';
 import { publishSSE } from '../utils/sse';
 import { calculateCandidateSimilarity } from '../utils/dedup';
@@ -30,7 +30,7 @@ const leadIdSchema = z.object({
 });
 
 const enrichSchema = z.object({
-  provider: z.enum(['contactout', 'snovio', 'osint']).optional(),
+  provider: z.enum(['auto', 'contactout', 'snovio', 'osint', 'hunter', 'apollo', 'apollo_io', 'lusha', 'rocketreach', 'prospeo', 'findymail']).optional(),
 });
 
 const draftSchema = z.object({
@@ -140,7 +140,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         l.id, l.lead_score, l.score_band, l.pipeline_stage, l.data_quality,
         l.email_status, l.whatsapp_status, l.do_not_contact, l.assigned_to,
         l.created_at, l.updated_at,
-        jp.source_site,
+        jp.source_site, jp.title AS job_title,
         c.name as company_name, c.domain as company_domain,
         hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
         hc.personal_email as hr_email, hc.personal_mobile as hr_mobile
@@ -238,6 +238,29 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
+  fastify.get<{ Params: { id: string } }>(
+    '/:id/score',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const idResult = leadIdSchema.safeParse(req.params);
+      if (!idResult.success) return reply.status(400).send({ error: 'Invalid lead ID' });
+      const { id } = idResult.data;
+      const sql = getDB();
+      const user = req.user as { id: string; role: string };
+
+      // Authorization: a sales_rep may only see their own assigned leads (server-side).
+      const owned = await sql.unsafe(
+        `SELECT 1 FROM leads WHERE id = $1${user.role === 'sales_rep' ? ' AND assigned_to = $2' : ''}`,
+        (user.role === 'sales_rep' ? [id, user.id] : [id]) as any,
+      );
+      if (!owned || owned.length === 0) return reply.status(404).send({ error: 'Lead not found' });
+
+      const explained = await scoreExplain(sql, id);
+      if (!explained) return reply.status(404).send({ error: 'Lead not found' });
+      return explained;
+    },
+  );
+
   fastify.post<{ Params: { id: string } }>(
     '/:id/enrich',
     {
@@ -281,7 +304,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         provider: provider || 'auto',
       });
 
-      await recomputeLeadScore(getDB(), id, { pipelineStage: 'enriched' });
+      await recomputeLeadScore(getDB(), id);
 
       return reply.status(202).send({
         message: 'Enrichment job queued',
@@ -328,7 +351,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         job_id: String(jobId),
       });
 
-      await recomputeLeadScore(getDB(), id, { pipelineStage: 'verified' });
+      await recomputeLeadScore(getDB(), id);
 
       return reply.status(202).send({
         message: 'Verification job queued',
@@ -381,7 +404,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
          channel,
        });
 
-       await recomputeLeadScore(getDB(), id, { pipelineStage: 'drafted' });
+       await recomputeLeadScore(getDB(), id);
 
        return reply.status(202).send({
          message: 'Draft generation job queued',
@@ -546,8 +569,9 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         channel,
       });
 
-      await recomputeLeadScore(getDB(), id, { pipelineStage: 'contacted' });
-
+      // NOTE: do NOT optimistically set pipeline_stage='contacted' here. The
+      // worker sets it ONLY after the provider reports a real send. Marking it
+      // on enqueue would be a fake-success state (button clicked ≠ message sent).
       return reply.status(202).send({
         message: 'Send job queued',
         job_id: String(jobId),
@@ -601,8 +625,8 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         channel,
       });
 
-      await recomputeLeadScore(getDB(), id, { pipelineStage: 'contacted' });
-
+      // No premature 'contacted': the verify-send worker sets it only on a real
+      // provider success (and blocks on do-not-contact / failed verification).
       return reply.status(202).send({
         message: 'Verify & Send job queued',
         job_id: String(jobId),

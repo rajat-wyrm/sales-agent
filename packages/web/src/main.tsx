@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from 'react-query';
 import App from '@/App';
 import { ToastProvider } from '@/components/ui/toast';
+import '@fontsource-variable/inter';
 import './index.css';
 
 const queryClient = new QueryClient({

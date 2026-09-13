@@ -8,6 +8,7 @@ is a separate Redis-queue consumer.
 import json
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 import redis.asyncio as redis
@@ -24,6 +25,34 @@ async def enqueue_job(
     job_id = await redis_client.lpush(queue_name, json.dumps(payload))
     logger.info(f"Enqueued job to {queue_name}: {job_id}")
     return str(job_id)
+
+
+async def chain_lead(
+    redis_client: redis.Redis,
+    queue_name: str,
+    lead_id: str,
+    requested_by: str = "system",
+    **extra: Any,
+) -> None:
+    """Forward a lead to the next pipeline stage.
+
+    The pipeline was never chained: scrape→normalize stopped at insert and each
+    downstream stage only ran when the API manually enqueued it. This is the one
+    place a lead is pushed onward, so the daily full-fleet run actually flows
+    all the way to a drafted email (draft-only mode — send is always human).
+
+    Fire-and-forget by design: a failed hand-off is logged but must not roll back
+    the completed upstream work.
+    """
+    try:
+        await enqueue_job(redis_client, queue_name, {
+            "lead_id": str(lead_id),
+            "requested_by": requested_by,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"chain_lead -> {queue_name} failed for lead {lead_id}: {e}")
 
 
 async def dequeue_job(

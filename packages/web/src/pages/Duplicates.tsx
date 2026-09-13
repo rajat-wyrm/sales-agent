@@ -9,7 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { ErrorState } from '@/components/ui/error-state';
 import { useToast } from '@/components/ui/toast';
 import { AlertTriangle, Merge, X, Copy } from 'lucide-react';
-import { STAGE_META, SCORE_BAND_META, formatDate } from '@/lib/format';
+import { stageMeta, SCORE_BAND_META, formatDate } from '@/lib/format';
 
 interface DuplicateCandidate {
   lead_id: string;
@@ -27,7 +27,7 @@ interface DuplicateCandidate {
 }
 
 const stageBadge = (stage: string) => {
-  const meta = STAGE_META[stage as keyof typeof STAGE_META];
+  const meta = stageMeta(stage);
   return meta ? <Badge className={meta.className}>{meta.label}</Badge> : <Badge variant="secondary">{stage}</Badge>;
 };
 
@@ -69,7 +69,7 @@ const Duplicates: React.FC = () => {
   const duplicates: DuplicateCandidate[] = (data as any)?.duplicates || [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-phi4">
       <PageHeader
         title="Duplicate Leads"
         description="Review and resolve potential duplicate leads in your pipeline"

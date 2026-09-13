@@ -57,3 +57,22 @@ export function decryptApiKeys(keys: Record<string, string>): Record<string, str
   }
   return result;
 }
+
+// Return a NON-SENSITIVE view of stored provider keys: whether each is set and
+// a last-4 mask for the UI. The plaintext secret never leaves the server — this
+// is what the GET /settings/api-keys endpoint must return.
+export function maskApiKeys(encrypted: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(encrypted)) {
+    if (!value) continue;
+    let last4 = '';
+    try {
+      const plain = decryptText(value) || '';
+      last4 = plain.slice(-4);
+    } catch {
+      last4 = '';
+    }
+    out[key] = last4 ? `••••${last4}` : '••••••••';
+  }
+  return out;
+}

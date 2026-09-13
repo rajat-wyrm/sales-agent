@@ -55,6 +55,10 @@ SCRAPER_MAP = {
     "facebook": ("scrapers.facebook_groups", "FacebookGroupsScraper"),
     "whatsapp": ("scrapers.whatsapp_listener", "WhatsAppListener"),
     "college_portals": ("scrapers.spiders.college_placement", "CollegePlacementSpider"),
+    "apna": ("scrapers.apna", "ApnaScraper"),
+    "workindia": ("scrapers.workindia", "WorkIndiaScraper"),
+    "hirist": ("scrapers.hirist", "HiristScraper"),
+    "classicjobs": ("scrapers.classicjobs", "ClassicJobsScraper"),
 }
 DEFAULT_SOURCES = [
     "remoteok", "github_jobs", "greenhouse", "lever", "naukri", "internshala",
@@ -63,11 +67,11 @@ DEFAULT_SOURCES = [
     "unstop", "jobinsider", "iimjobs",
     "arbeitnow", "usajobs", "duckduckgo",
     "ashby", "recruitee", "smartrecruiters", "breezy",
-    "timesjobs",
+    "timesjobs", "apna", "workindia", "hirist", "classicjobs",
 ]
 
 
-async def run_scraper(source: str, redis_client: redis.Redis, db=None) -> tuple[int, str | None]:
+async def run_scraper(source: str, redis_client: redis.Redis, db=None, requested_by: str | None = None) -> tuple[int, str | None]:
     """Run a single scraper and enqueue its results.
 
     Returns (leads_count, error_message).
@@ -84,7 +88,7 @@ async def run_scraper(source: str, redis_client: redis.Redis, db=None) -> tuple[
         scraper_cls = getattr(mod, class_name)
         scraper = scraper_cls(redis_client=redis_client, db=db)
 
-        leads = await scraper.scrape_and_enqueue()
+        leads = await scraper.scrape_and_enqueue(requested_by=requested_by)
         logger.info(f"Source {source}: scraped and enqueued {leads} leads")
         return leads, None
 
@@ -135,7 +139,7 @@ async def consume_scrape_queue(
                 if db_pool:
                     db = await db_pool.acquire()
                 try:
-                    count, err = await run_scraper(src, redis_client, db)
+                    count, err = await run_scraper(src, redis_client, db, requested_by=triggered_by)
                     if err:
                         results["sources_failed"].append({"source": src, "error": err})
                     else:

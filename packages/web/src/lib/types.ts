@@ -31,12 +31,17 @@ export type PipelineStage =
   | 'drafted'
   | 'contacted'
   | 'replied'
-  | 'bounced';
+  | 'bounced'
+  | 'contact_unavailable'
+  | 'suppressed'
+  | 'send_failed'
+  | 'provider_error'
+  | 'retry_pending';
 
 export type ScoreBand = 'hot' | 'warm' | 'cold';
 export type DataQuality = 'complete' | 'incomplete';
-export type EmailStatus = 'valid' | 'invalid' | 'catch_all' | 'disposable' | 'unknown' | null;
-export type WhatsAppStatus = 'registered' | 'not_registered' | 'unknown' | null;
+export type EmailStatus = 'valid' | 'invalid' | 'catch_all' | 'disposable' | 'unknown' | 'expired' | null;
+export type WhatsAppStatus = 'registered' | 'not_registered' | 'unknown' | 'expired' | null;
 
 export interface Lead {
   id: string;
