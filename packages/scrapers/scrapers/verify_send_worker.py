@@ -32,6 +32,14 @@ async def process_verify_and_send_job(
     channel = payload.get("channel", "both")
     draft_id = payload.get("draft_id")
     requested_by = payload.get("requested_by", "system")
+    # outreach_log.sent_by + the users lookup need a real UUID; scheduled /
+    # sentinel requesters ("system") must coerce to NULL, not crash the FK.
+    user_id: Any = None
+    try:
+        from uuid import UUID
+        user_id = UUID(str(requested_by))
+    except (ValueError, TypeError):
+        user_id = None
 
     if not lead_id:
         logger.error("Verify-send job missing lead_id")
@@ -49,7 +57,7 @@ async def process_verify_and_send_job(
             JOIN companies c ON l.company_id = c.id
             LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
             WHERE l.id = $1
-            FOR UPDATE
+            FOR UPDATE OF l
             """,
             lead_id,
         )
@@ -107,8 +115,8 @@ async def process_verify_and_send_job(
 
         user_row = await conn.fetchrow(
             "SELECT api_keys FROM users WHERE id = $1",
-            requested_by,
-        )
+            user_id,
+        ) if user_id else None
         api_keys: dict[str, str] = {}
         if user_row and user_row["api_keys"]:
             try:
@@ -119,7 +127,7 @@ async def process_verify_and_send_job(
                         try:
                             api_keys[k] = decrypt_api_key(v)
                         except Exception:
-                            api_keys[k] = v
+                            continue  # skip undecryptable key; never forward ciphertext
             except Exception:
                 pass
 
@@ -144,7 +152,7 @@ async def process_verify_and_send_job(
                 results.append({"channel": "email", **result})
                 await conn.execute(
                     "INSERT INTO outreach_log (lead_id, draft_id, channel, sent_by, provider_message_id, delivery_status) VALUES ($1, $2, 'email', $3, $4, $5)",
-                    lead_id, draft_id if draft_id else None, requested_by, result.get("provider_message_id"), result["status"],
+                    lead_id, draft_id if draft_id else None, user_id, result.get("provider_message_id"), result["status"],
                 )
 
         # Send WhatsApp if verified
@@ -156,7 +164,7 @@ async def process_verify_and_send_job(
                 results.append({"channel": "whatsapp", **result})
                 await conn.execute(
                     "INSERT INTO outreach_log (lead_id, draft_id, channel, sent_by, provider_message_id, delivery_status) VALUES ($1, $2, 'whatsapp', $3, $4, $5)",
-                    lead_id, draft_id if draft_id else None, requested_by, result.get("provider_message_id"), result["status"],
+                    lead_id, draft_id if draft_id else None, user_id, result.get("provider_message_id"), result["status"],
                 )
 
         # Update pipeline stage
@@ -173,12 +181,12 @@ async def process_verify_and_send_job(
         f"user:{requested_by}:sse",
         json.dumps({
             "type": "verify_send_complete",
-            "lead_id": lead_id,
+            "lead_id": str(lead_id),
             "email_status": email_status,
             "whatsapp_status": whatsapp_status,
             "results": results,
             "timestamp": asyncio.get_event_loop().time(),
-        }),
+        }, default=str),
     )
 
     logger.info(f"Verify-and-send complete for lead {lead_id}: {results}")

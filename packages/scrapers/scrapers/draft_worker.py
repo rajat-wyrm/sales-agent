@@ -194,11 +194,18 @@ async def process_draft_job(
         # Try Gemini first
         gemini_key = os.environ.get("GEMINI_API_KEY")
         if not gemini_key:
-            # Try user-supplied key
+            # Try user-supplied key. `requested_by` may be a scheduled sentinel
+            # ("system"/"daily_scheduler"), not a UUID -> coerce or skip lookup.
+            user_id = None
+            try:
+                from uuid import UUID
+                user_id = UUID(str(requested_by))
+            except (ValueError, TypeError):
+                user_id = None
             user_row = await conn.fetchrow(
                 "SELECT api_keys FROM users WHERE id = $1",
-                requested_by,
-            )
+                user_id,
+            ) if user_id else None
             if user_row and user_row["api_keys"]:
                 try:
                     from .crypto_utils.decrypt import decrypt_api_key
@@ -257,11 +264,11 @@ async def process_draft_job(
         f"user:{requested_by}:sse",
         json.dumps({
             "type": "draft_generated",
-            "lead_id": lead_id,
+            "lead_id": str(lead_id),
             "generated_by": generated_by,
             "channels": [ch for ch, _ in channels_to_create],
             "timestamp": asyncio.get_event_loop().time(),
-        }),
+        }, default=str),
     )
 
     logger.info(f"Draft generation complete for lead {lead_id}: {generated_by}")

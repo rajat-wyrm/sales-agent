@@ -131,12 +131,12 @@ async def process_verification_job(
     async with db_pool.acquire() as conn:
         lead = await conn.fetchrow(
             """
-            SELECT l.id, l.hr_email, l.hr_mobile, l.email_status, l.whatsapp_status,
+            SELECT l.id, l.email_status, l.whatsapp_status,
                    hc.personal_email, hc.personal_mobile
             FROM leads l
             LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
             WHERE l.id = $1
-            FOR UPDATE
+            FOR UPDATE OF l
             """,
             lead_id,
         )
@@ -145,8 +145,10 @@ async def process_verification_job(
             logger.warning(f"Lead not found: {lead_id}")
             return
 
-        email_to_verify = lead["personal_email"] or lead["hr_email"]
-        phone_to_verify = lead["personal_mobile"] or lead["hr_mobile"]
+        # Contactable values live on the joined hr_contacts row — leads has no
+        # hr_email/hr_mobile columns (verified against the authoritative schema).
+        email_to_verify = lead["personal_email"] or ""
+        phone_to_verify = lead["personal_mobile"] or ""
 
         email_status = "unknown"
         whatsapp_status = "unknown"
@@ -200,11 +202,11 @@ async def process_verification_job(
         f"user:{requested_by}:sse",
         json.dumps({
             "type": "verification_complete",
-            "lead_id": lead_id,
+            "lead_id": str(lead_id),
             "email_status": email_status,
             "whatsapp_status": whatsapp_status,
             "timestamp": asyncio.get_event_loop().time(),
-        }),
+        }, default=str),
     )
 
     logger.info(f"Verification complete for lead {lead_id}: email={email_status}, whatsapp={whatsapp_status}")
