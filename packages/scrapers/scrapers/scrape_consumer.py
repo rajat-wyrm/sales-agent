@@ -48,6 +48,10 @@ SCRAPER_MAP = {
     "cutshort": ("scrapers.cutshort", "CutShortScraper"),
     "linkedin": ("scrapers.linkedin_jobs", "LinkedInJobsScraper"),
     "freshersworld": ("scrapers.freshersworld", "FreshersworldScraper"),
+    "unstop": ("scrapers.unstop", "UnstopScraper"),
+    "jobinsider": ("scrapers.jobinsider", "JobinsiderScraper"),
+    "iimjobs": ("scrapers.iimjobs", "IimjobsScraper"),
+    "timesjobs": ("scrapers.timesjobs", "TimesjobsScraper"),
     "facebook": ("scrapers.facebook_groups", "FacebookGroupsScraper"),
     "whatsapp": ("scrapers.whatsapp_listener", "WhatsAppListener"),
     "college_portals": ("scrapers.spiders.college_placement", "CollegePlacementSpider"),
@@ -56,8 +60,10 @@ DEFAULT_SOURCES = [
     "remoteok", "github_jobs", "greenhouse", "lever", "naukri", "internshala",
     "indeed", "foundit", "instahyre", "wellfound", "glassdoor", "shine",
     "cutshort", "linkedin", "freshersworld",
+    "unstop", "jobinsider", "iimjobs",
     "arbeitnow", "usajobs", "duckduckgo",
     "ashby", "recruitee", "smartrecruiters", "breezy",
+    "timesjobs",
 ]
 
 
