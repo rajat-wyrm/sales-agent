@@ -19,7 +19,7 @@ import {
   Clock,
   AlertTriangle,
 } from 'lucide-react';
-import { formatDateTime } from '@/lib/format';
+import { formatDateTime, STAGE_META } from '@/lib/format';
 
 const STAGE_LABELS: Record<string, string> = {
   discovered: 'Discovered',

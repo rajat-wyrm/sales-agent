@@ -17,3 +17,8 @@
 /.ruff_cache
 /*.log
 .DS_Store
+
+# Python generated files
+__pycache__/
+*.pyc
+/packages/scrapers/output/

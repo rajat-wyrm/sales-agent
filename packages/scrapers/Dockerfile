@@ -12,6 +12,10 @@ WORKDIR /app
 
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
+
+# Install Playwright Chromium + required Linux dependencies
+RUN python -m playwright install --with-deps chromium
+
 EXPOSE 8000
 
 CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
