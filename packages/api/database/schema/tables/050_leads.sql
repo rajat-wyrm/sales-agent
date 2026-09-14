@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS leads (
          ELSE 'cold' END
   ) STORED,
   pipeline_stage TEXT DEFAULT 'discovered',
+  legal_basis TEXT DEFAULT 'legitimate_interest_b2b',
+  processing_purpose TEXT DEFAULT 'b2b_recruitment_outreach',
+  provenance JSONB,
   data_quality TEXT DEFAULT 'complete',
   email_status TEXT,
   whatsapp_status TEXT,

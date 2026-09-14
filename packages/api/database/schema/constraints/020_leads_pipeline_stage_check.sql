@@ -1,4 +1,5 @@
--- Lead lifecycle state machine (happy path + every failure state the spec lists)
+-- Lead lifecycle state machine (happy path + every failure state the spec lists).
+-- NOTE: 'contacted' is the legacy alias of 'sent' still written by workers/webhooks.
 DO $$ BEGIN
   ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_pipeline_stage_chk;
   ALTER TABLE leads ADD CONSTRAINT leads_pipeline_stage_chk CHECK (pipeline_stage IN (
