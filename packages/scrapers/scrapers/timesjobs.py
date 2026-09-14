@@ -9,6 +9,7 @@ job data.
 Extracts per SRS §4.4 schema.
 """
 
+import html
 import json
 import re
 import asyncio
@@ -56,7 +57,7 @@ class TimesjobsScraper(BaseScraper):
     @staticmethod
     def _parse_job(item: dict) -> dict | None:
         try:
-            title = re.sub(r"<[^>]+>", "", item.get("title") or "").strip()
+            title = html.unescape(re.sub(r"<[^>]+>", "", item.get("title") or "")).strip()
             title = re.sub(r"\s*Job\s+Details\s*\|\s*", " — ", title).strip()
             if not title:
                 return None
@@ -91,7 +92,7 @@ class TimesjobsScraper(BaseScraper):
 
             # Description
             desc = item.get("description") or ""
-            desc = re.sub(r"<[^>]+>", " ", desc)
+            desc = html.unescape(re.sub(r"<[^>]+>", " ", desc))
             desc = re.sub(r"\s+", " ", desc).strip()[:500]
 
             is_fresher = is_fresher_role(title, exp_str, desc.lower())

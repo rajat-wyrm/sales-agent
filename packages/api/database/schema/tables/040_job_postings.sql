@@ -12,6 +12,25 @@ CREATE TABLE IF NOT EXISTS job_postings (
   raw_payload JSONB,
   parser_version TEXT,
   content_hash TEXT,
+  -- Posting facets. Declared here so a FRESH install matches an upgraded one:
+  -- these previously existed only in migration 007, which never runs against a
+  -- new database, so every insert_lead() crashed with UndefinedColumnError.
+  location TEXT,
+  city TEXT,
+  state TEXT,
+  country TEXT,
+  location_type TEXT CHECK (location_type IN ('remote', 'onsite', 'hybrid')),
+  employment_type TEXT,
+  is_work_from_home BOOLEAN DEFAULT false,
+  apply_url TEXT,
+  posted_at TIMESTAMPTZ,
+  about_job TEXT,
+  department TEXT,
+  openings_count INTEGER,
+  salary_min NUMERIC(14,2),
+  salary_max NUMERIC(14,2),
+  salary_currency TEXT,
+  salary_period TEXT,
   first_seen_at TIMESTAMPTZ DEFAULT now(),
   last_seen_at TIMESTAMPTZ DEFAULT now(),
   is_active BOOLEAN DEFAULT true

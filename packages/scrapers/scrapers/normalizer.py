@@ -31,7 +31,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Immutable-raw-snapshot versioning (Track 3): bump when normalize_lead's
 # output contract changes so reprocessing can tell stale snapshots apart.
-PARSER_VERSION = "3"
+PARSER_VERSION = "4"
 
 
 def content_hash_of(raw_payload: Any) -> str:
@@ -584,6 +584,327 @@ async def run_holehe_check(email: str) -> dict[str, Any]:
     return {"valid": False, "platforms": []}
 
 
+def _parse_salary_bounds(raw: dict[str, Any], salary_range: str) -> tuple[float | None, float | None, str, str]:
+    """Derive (min, max, currency, period) from whatever a source gave us.
+
+    Sources are wildly inconsistent: some send salary_min/salary_max, some only a
+    free-text range like "3-6 LPA" or "₹25,000 - ₹40,000 per month". Numeric
+    bounds are what make sorting/filtering possible, so parse them here once
+    instead of each scraper inventing its own regex.
+    """
+    import re
+
+    def _num(v: Any) -> float | None:
+        if v is None or v == "":
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            m = re.search(r"[\d,]+(?:\.\d+)?", str(v))
+            if not m:
+                return None
+            f = float(m.group(0).replace(",", ""))
+        return f if f > 0 else None
+
+    lo = _num(raw.get("salary_min") or raw.get("minSalary") or raw.get("salaryMin"))
+    hi = _num(raw.get("salary_max") or raw.get("maxSalary") or raw.get("salaryMax") or raw.get("salary_up_to"))
+
+    currency = (str(raw.get("salary_currency") or "").strip().upper() or None)
+    period = (str(raw.get("salary_period") or raw.get("period") or "").strip().lower() or None)
+
+    # Fall back to the text range when structured fields were absent.
+    if (lo is None or hi is None) and salary_range:
+        txt = str(salary_range)
+        nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", txt)]
+        mult = 1.0
+        low_txt = txt.lower()
+        if any(w in low_txt for w in ("lakh", "lpa", " lac", " lakhs")):
+            mult = 100_000.0
+        elif "crore" in low_txt or "cpa" in low_txt:
+            mult = 10_000_000.0
+        elif re.search(r"\bp\.?a\.?\b|annum|/year|per year", low_txt):
+            mult = 12.0 if re.search(r"month", low_txt) else 1.0
+        if nums:
+            if lo is None:
+                lo = nums[0] * mult
+            if hi is None:
+                hi = (nums[-1] if len(nums) > 1 else nums[0]) * mult
+        if currency is None:
+            if "₹" in txt or re.search(r"\brs\.?\b", txt, re.I):
+                currency = "INR"
+            elif "$" in txt:
+                currency = "USD"
+            elif "€" in txt:
+                currency = "EUR"
+            elif "£" in txt:
+                currency = "GBP"
+        if period is None:
+            if "month" in low_txt or "/mo" in low_txt:
+                period = "month"
+            elif "year" in low_txt or "annum" in low_txt or "lpa" in low_txt or "p.a" in low_txt:
+                period = "year"
+
+    if lo and hi and hi < lo:
+        lo, hi = hi, lo
+    return lo, hi, (currency or ""), (period or "")
+
+
+def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Map a normalized lead onto every job_postings column.
+
+    Root cause fix for "location / apply url / salary / department are missing
+    everywhere": normalize_lead already extracted location and about_job, and
+    scrapers emit city/state/country/workplace_type/posted_at/department, but the
+    INSERT listed only 12 columns, so all of it was dropped on write and the CRM
+    had nothing to display. One mapping used by both insert and dedup-update keeps
+    the two paths from drifting again.
+    """
+    raw = normalized.get("raw_payload") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    # Sources disagree on shape: some send a flat string, some an array of
+    # strings or {location: ...} objects. Check all three before giving up.
+    # Re-flatten defensively: a scraper may have handed us an object even though
+    # normalize_lead already flattened it (the dedup path stores raw_payload as-is).
+    loc = _flatten_location(normalized.get("location"))
+    if not loc:
+        for key in ("location", "job_location", "city", "locations", "locationUrls"):
+            loc = _flatten_location(raw.get(key))
+            if loc:
+                break
+    about_text = (normalized.get("about_job") or "").lower()
+    workplace = str(
+        raw.get("workplace_type") or raw.get("workplaceType") or raw.get("workMode")
+        or raw.get("typeOfEmployment") or raw.get("employment_type") or raw.get("type") or ""
+    ).strip().lower()
+    wt_map = {
+        "remote": "remote", "work from home": "remote", "wfh": "remote",
+        "onsite": "onsite", "on-site": "onsite", "office": "onsite",
+        "hybrid": "hybrid",
+    }
+    location_type = wt_map.get(workplace)
+    if location_type is None and loc:
+        l = loc.lower()
+        if "remote" in l and "onsite" not in l and "office" not in l:
+            location_type = "remote"
+        elif ("onsite" in l or "office" in l) and "remote" not in l:
+            location_type = "onsite"
+        elif "hybrid" in l:
+            location_type = "hybrid"
+    # Many Indian boards only state the work mode inside the description text
+    # ("Hybrid", "Work from home"); infer it there rather than leaving NULL.
+    if location_type is None and about_text:
+        hits = {w for w in ("remote", "onsite", "on-site", "hybrid", "work from home") if w in about_text}
+        if hits == {"hybrid"} or ("hybrid" in hits and len(hits) == 1):
+            location_type = "hybrid"
+        elif hits and len(hits) == 1:
+            only = next(iter(hits))
+            location_type = "remote" if only in ("remote", "work from home") else "onsite"
+
+    salary_range = normalized.get("salary_range") or ""
+    s_min, s_max, s_cur, s_per = _parse_salary_bounds(raw, salary_range)
+
+    def _scale_lakh(v: Any) -> float | None:
+        """AmbitionBox-style CTC fields are already in lakhs (minCtc=8 means 8 LPA)."""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f * 100_000.0 if f > 0 else None
+
+    # AmbitionBox-style sources report CTC as minCtc/maxCtc in lakhs.
+    if s_min is None:
+        s_min = _scale_lakh(raw.get("minCtc") or raw.get("min_ctc"))
+    if s_max is None:
+        s_max = _scale_lakh(raw.get("maxCtc") or raw.get("max_ctc"))
+    if s_min and not s_cur:
+        s_cur = "INR"
+    if s_min and not s_per:
+        s_per = "year"
+    if not salary_range and (s_min is None or s_max is None):
+        # Nothing structured reached us, so mine the free text. Boards state pay
+        # inline in many shapes: "(₹25-45 LPA)", "CTC: 3.5 - 6 lakh per annum",
+        # "Stipend ₹15,000/month", "8 LPA to 12 LPA", "50k - 80k".
+        # Money must be ANCHORED to a currency marker or a salary keyword. A loose
+        # numeric range matched internship durations ("Duration: 1-2 Months") and
+        # turned them into a ₹1–₹2 salary, which is worse than leaving it NULL.
+        anchor = re.compile(
+            r"(?:salary|salaries|ctc|stipend|package|pay|comp|compensation|"
+            r"lpa|per\s+annum|p\.a\.|₹|rs\.?|\$|€|£|inr|usd)", re.I)
+        range_re = re.compile(
+            r"(\d+(?:[.,]\d+)*)\s*(lpa|lakhs?|lac|lacs?|cr(?:ore)?|k)?\s*"
+            r"(?:-|–|—|\bto\b|/)\s*"
+            r"(?:₹|rs\.?\s*|\$|€|£|inr\s*)?\s*"
+            r"(\d+(?:[.,]\d+)*)\s*(lpa|lakhs?|lac|lacs?|cr(?:ore)?|k)?", re.I)
+        single_re = re.compile(
+            r"(?:₹|rs\.?\s*|\$|€|£)\s*(\d+(?:[.,]\d+)*)\s*"
+            r"(lpa|lakhs?|lac|lacs?|cr(?:ore)?|k)?", re.I)
+        nums: list[tuple[str, str | None]] = []
+        for m in anchor.finditer(about_text):
+            # Look both ways from the anchor: "Salary: ₹15-20 LPA" and
+            # "1 - 2 crore package" are both real, and scanning only forward
+            # missed the trailing-unit phrasing entirely. Bounded to ±90 chars so
+            # we cannot reach across a sentence into unrelated figures.
+            chunk = about_text[max(0, m.start() - 60):m.start() + 90]
+            cand = range_re.search(chunk)
+            if cand:
+                nums = [(cand.group(1), cand.group(2)), (cand.group(3), cand.group(4))]
+                break
+            one = single_re.search(chunk)
+            if one:
+                nums = [(one.group(1), one.group(2))]
+                break
+
+        def _to_value(digits: str, unit: str) -> float | None:
+            try:
+                # Indian grouping ("12,00,000") and decimals ("3.5") both appear.
+                val = float(digits.replace(",", ""))
+            except ValueError:
+                return None
+            u = (unit or "").lower().replace(" ", "")
+            if u.startswith("lpa") or u.startswith("lakh") or u.startswith("lac"):
+                return val * 100_000.0
+            if u.startswith("cr"):
+                return val * 10_000_000.0
+            if u == "k" or u.startswith("thousand"):
+                return val * 1_000.0
+            return val
+
+        # A trailing unit after the LAST number applies to the whole range when
+        # the earlier number carried none ("₹25-45 LPA").
+        units_present = [u for _, u in nums]
+        trailing_unit = next((u for u in reversed(units_present) if u), "")
+        values = [_to_value(d, u or trailing_unit) for d, u in nums]
+        values = [v for v in values if v and v > 0]
+        if len(values) >= 2:
+            lo, hi = min(values), max(values)
+            # Reject implausible bands: an anchored scan can still land on a
+            # duration ("stipend within 1-2 months"), and ₹1–₹2 is never pay.
+            # Real Indian fresher pay starts around ₹5,000/month.
+            if lo >= 1_000:
+                s_min = s_min if s_min is not None else lo
+                s_max = s_max if s_max is not None else hi
+                s_cur = s_cur or ("USD" if "$" in about_text else "INR")
+                if not s_per:
+                    near = (trailing_unit or "").lower()
+                    if near.startswith("lpa") or near.startswith("lakh") or near.startswith("lac") \
+                       or near.startswith("cr") or "annum" in about_text:
+                        s_per = "year"
+                    elif "month" in about_text or "stipend" in about_text:
+                        s_per = "month"
+        elif len(values) == 1 and s_min is None and values[0] >= 1_000:
+            s_min = values[0]
+            s_cur = s_cur or "INR"
+
+    posted = raw.get("posted_at") or raw.get("published_at") or raw.get("publishDate") or raw.get("firstPublishDate")
+    posted_dt = None
+    if posted:
+        import datetime as _dt
+        if isinstance(posted, (int, float)):
+            try:
+                posted_dt = _dt.datetime.fromtimestamp(posted / 1000 if posted > 1e11 else posted, tz=_dt.timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                posted_dt = None
+        else:
+            s = str(posted).strip().replace("Z", "+00:00")
+            for fmt in (None, "%Y-%m-%d", "%d/%m/%Y", "%b %d, %Y"):
+                try:
+                    posted_dt = _dt.datetime.fromisoformat(s) if fmt is None else _dt.datetime.strptime(s, fmt)
+                    break
+                except (ValueError, TypeError):
+                    continue
+            else:
+                posted_dt = None
+        if posted_dt is not None and posted_dt.tzinfo is None:
+            posted_dt = posted_dt.replace(tzinfo=_dt.timezone.utc)
+
+    openings = raw.get("openings") or raw.get("openings_count") or raw.get("vacancies") or raw.get("no_of_positions")
+    try:
+        openings = int(openings) if openings not in (None, "") else None
+    except (TypeError, ValueError):
+        openings = None
+
+    return {
+        "location": loc or None,
+        "city": (raw.get("city") or "").strip() or None,
+        "state": (raw.get("state") or "").strip() or None,
+        "country": (raw.get("country") or "").strip() or None,
+        "location_type": location_type,
+        "employment_type": (str(raw.get("employment_type") or raw.get("employmentType") or "").strip().lower()
+                            or ("fulltime" if "full time" in workplace or "full-time" in workplace else None)),
+        "is_work_from_home": location_type == "remote",
+        "apply_url": (str(raw.get("apply_url") or raw.get("applyUrl") or raw.get("application_url") or "").strip()
+                      or normalized.get("job_url") or None),
+        "posted_at": posted_dt,
+        "about_job": (normalized.get("about_job") or "").strip() or None,
+        "department": (str(raw.get("department") or raw.get("category") or raw.get("functional_area")
+                            or raw.get("roleId") or raw.get("roleCategoryId") or "").strip()) or None,
+        "openings_count": openings,
+        "salary_min": s_min,
+        "salary_max": s_max,
+        "salary_currency": s_cur or None,
+        "salary_period": s_per or None,
+    }
+
+
+def _flatten_location(value: Any) -> str:
+    """Coerce any source's location shape into a single human string.
+
+    Boards send this as a plain string, a {city, region, country} object, a
+    {code, name} pair, or a list of those. Returning raw JSON here is what put
+    `{"city": "Bengaluru", ...}` into job_postings.location and made the CRM print
+    braces at the user. Never raises; empty/None becomes ''.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        # Some feeds double-encode the object as a JSON string.
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return _flatten_location(json.loads(text))
+            except (ValueError, TypeError):
+                return text[:120]
+        return text[:120]
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            s = _flatten_location(item)
+            if s and s not in parts:
+                parts.append(s)
+        return ", ".join(parts)[:120]
+    if isinstance(value, dict):
+        # Prefer the fields that read well to a human, then fall back to any
+        # scalar values so nothing is silently lost.
+        for key in ("fullLocation", "address", "name", "label", "displayName",
+                    "city", "location", "region", "state", "country"):
+            v = value.get(key)
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                inner = _flatten_location(v)
+                if inner:
+                    # fullLocation/address are already complete -- appending the
+                    # component fields produced "Bengaluru, KA, India, KA, in".
+                    if key in ("fullLocation", "address", "name", "label", "displayName"):
+                        return inner[:120]
+                    tail = [x for x in (_flatten_location(value.get(k))
+                                         for k in ("region", "state", "country")
+                                         if value.get(k)) if x and x != inner]
+                    return ", ".join([inner] + tail)[:120]
+            elif isinstance(v, (dict, list)):
+                inner = _flatten_location(v)
+                if inner:
+                    return inner[:120]
+        seen = []
+        for v in value.values():
+            s = _flatten_location(v)
+            if s and s not in seen and len(s) <= 40:
+                seen.append(s)
+        return ", ".join(seen)[:120]
+    return ""
+
+
 def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize a raw scraped lead to the SRS §4.4 extraction schema.
 
@@ -601,8 +922,7 @@ def normalize_lead(raw: dict[str, Any]) -> dict[str, Any]:
     # field the source populated so the central geo-gate can evaluate it.
     # NOTE: do NOT fall back to experience_required — that field holds years of
     # experience, not a location (fixed in issue #7).
-    location = (raw.get("location") or raw.get("job_location")
-                or raw.get("city") or "").strip()
+    location = _flatten_location(raw.get("location") or raw.get("job_location") or raw.get("city"))
 
     # NLP re-validation per SRS §4.2b: always re-classify using word-boundary matching
     is_fresher = classify_fresher(job_title, str(experience_required), str(about_job))
@@ -970,10 +1290,35 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
         fp,
     )
     if existing:
+        # Same 30-day duplicate: refresh the facets too. This is the path a daily
+        # re-scrape actually takes, so skipping it left location/salary NULL forever
+        # even after the scrapers started extracting them.
+        _jc = job_posting_columns(normalized)
         await sql.execute(
-            "UPDATE job_postings SET last_seen_at = NOW(), raw_payload = $1, content_hash = $2 WHERE id = $3",
+            """UPDATE job_postings SET last_seen_at = NOW(), raw_payload = $1, content_hash = $2,
+                       location = COALESCE(location, $3),
+                       city = COALESCE(city, $4),
+                       state = COALESCE(state, $5),
+                       country = COALESCE(country, $6),
+                       location_type = COALESCE(location_type, $7),
+                       employment_type = COALESCE(employment_type, $8),
+                       apply_url = COALESCE(apply_url, $9),
+                       posted_at = COALESCE(posted_at, $10),
+                       about_job = COALESCE(about_job, $11),
+                       department = COALESCE(department, $12),
+                       openings_count = COALESCE(openings_count, $13),
+                       salary_min = COALESCE(salary_min, $14),
+                       salary_max = COALESCE(salary_max, $15),
+                       salary_currency = COALESCE(salary_currency, $16),
+                       salary_period = COALESCE(salary_period, $17)
+                 WHERE id = $18""",
             json.dumps(normalized["raw_payload"]),
             content_hash_of(normalized["raw_payload"]),
+            _jc["location"], _jc["city"], _jc["state"], _jc["country"],
+            _jc["location_type"], _jc["employment_type"], _jc["apply_url"],
+            _jc["posted_at"], _jc["about_job"], _jc["department"],
+            _jc["openings_count"], _jc["salary_min"], _jc["salary_max"],
+            _jc["salary_currency"], _jc["salary_period"],
             existing,
         )
         logger.info(f"Lead deduped (fingerprint match): {fp}")
@@ -985,10 +1330,36 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
         fp,
     )
     if old_existing:
+        # Refresh the extracted facets too: a re-seen posting often carries fields
+        # the first scrape missed (location, salary bounds), and leaving them NULL
+        # forever is why the CRM showed blanks on older rows.
+        _jc = job_posting_columns(normalized)
         await sql.execute(
-            "UPDATE job_postings SET first_seen_at = NOW(), last_seen_at = NOW(), raw_payload = $1, content_hash = $2 WHERE id = $3",
+            """UPDATE job_postings SET first_seen_at = NOW(), last_seen_at = NOW(),
+                       raw_payload = $1, content_hash = $2,
+                       location = COALESCE(location, $3),
+                       city = COALESCE(city, $4),
+                       state = COALESCE(state, $5),
+                       country = COALESCE(country, $6),
+                       location_type = COALESCE(location_type, $7),
+                       employment_type = COALESCE(employment_type, $8),
+                       apply_url = COALESCE(apply_url, $9),
+                       posted_at = COALESCE(posted_at, $10),
+                       about_job = COALESCE(about_job, $11),
+                       department = COALESCE(department, $12),
+                       openings_count = COALESCE(openings_count, $13),
+                       salary_min = COALESCE(salary_min, $14),
+                       salary_max = COALESCE(salary_max, $15),
+                       salary_currency = COALESCE(salary_currency, $16),
+                       salary_period = COALESCE(salary_period, $17)
+                 WHERE id = $18""",
             json.dumps(normalized["raw_payload"]),
             content_hash_of(normalized["raw_payload"]),
+            _jc["location"], _jc["city"], _jc["state"], _jc["country"],
+            _jc["location_type"], _jc["employment_type"], _jc["apply_url"],
+            _jc["posted_at"], _jc["about_job"], _jc["department"],
+            _jc["openings_count"], _jc["salary_min"], _jc["salary_max"],
+            _jc["salary_currency"], _jc["salary_period"],
             old_existing,
         )
         job_id = old_existing
@@ -1107,12 +1478,18 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
 
     # Insert new job_posting if fingerprint is new
     if not old_existing:
+        _jc = job_posting_columns(normalized)
         job_id = await sql.fetchval(
             """INSERT INTO job_postings
                (company_id, hr_contact_id, title, description, experience_level,
                 salary_range, job_url, source_site, fingerprint, raw_payload,
-                parser_version, content_hash)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                parser_version, content_hash,
+                location, city, state, country, location_type, employment_type,
+                is_work_from_home, apply_url, posted_at, about_job, department,
+                openings_count, salary_min, salary_max, salary_currency, salary_period)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                       $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+                       $24, $25, $26, $27, $28)
                RETURNING id""",
             company_id,
             hr_id,
@@ -1126,6 +1503,11 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             json.dumps(normalized["raw_payload"]),
             PARSER_VERSION,
             content_hash_of(normalized["raw_payload"]),
+            _jc["location"], _jc["city"], _jc["state"], _jc["country"],
+            _jc["location_type"], _jc["employment_type"], _jc["is_work_from_home"],
+            _jc["apply_url"], _jc["posted_at"], _jc["about_job"], _jc["department"],
+            _jc["openings_count"], _jc["salary_min"], _jc["salary_max"],
+            _jc["salary_currency"], _jc["salary_period"],
         )
 
     # Insert lead (legal_basis/purpose default at DB level: legitimate-interest B2B outreach)

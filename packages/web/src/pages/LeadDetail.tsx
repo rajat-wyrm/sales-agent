@@ -35,6 +35,7 @@ import {
   Phone,
   Globe,
   Building2,
+  ExternalLink,
 } from 'lucide-react';
 import {
   SCORE_BAND_META,
@@ -43,6 +44,7 @@ import {
   whatsappStatusMeta,
   DATA_QUALITY_META,
   formatDateTime,
+  formatDate,
 } from '@/lib/format';
 
 type EditingState = {
@@ -475,6 +477,37 @@ const LeadDetail: React.FC = () => {
                   <dd className="text-right font-medium text-foreground capitalize">{v}</dd>
                 </div>
               ))}
+              {/* Posting facets the scrapers captured but never surfaced. Applied
+                  conditionally so a missing value shows nothing rather than a row
+                  of dashes. */}
+              {[
+                ['Location', [lead.city, lead.state, lead.country].filter(Boolean).join(', ') || lead.location],
+                ['Workplace', lead.location_type],
+                ['Employment', lead.employment_type],
+                ['Department', lead.department],
+                ['Openings', lead.openings_count != null ? String(lead.openings_count) : null],
+                ['Posted', lead.posted_at ? formatDate(lead.posted_at) : null],
+              ].filter(([, v]) => v).map(([k, v]) => (
+                <div key={k} className="flex items-start justify-between gap-4 py-2.5">
+                  <dt className="text-muted-foreground">{k}</dt>
+                  <dd className="text-right font-medium capitalize text-foreground">{v}</dd>
+                </div>
+              ))}
+              {(lead.apply_url || lead.job_url) && (
+                <div className="flex items-start justify-between gap-4 py-2.5">
+                  <dt className="text-muted-foreground">Apply</dt>
+                  <dd className="text-right">
+                    <a
+                      href={lead.apply_url || lead.job_url || undefined}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                    >
+                      Open posting <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </dd>
+                </div>
+              )}
             </dl>
             {lead.hr_name && (
               <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">

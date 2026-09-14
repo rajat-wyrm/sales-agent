@@ -144,6 +144,13 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         l.email_status, l.whatsapp_status, l.do_not_contact, l.assigned_to,
         l.created_at, l.updated_at,
         jp.source_site, jp.title AS job_title,
+        -- The table renders location / salary / experience per row; these were
+        -- never selected, so every cell fell back to a placeholder.
+        jp.job_url, jp.apply_url, jp.salary_range, jp.experience_level,
+        jp.location, jp.city, jp.state, jp.country, jp.location_type,
+        jp.employment_type, jp.is_work_from_home, jp.posted_at,
+        jp.department, jp.openings_count,
+        jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period,
         c.name as company_name, c.domain as company_domain,
         hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
         hc.personal_email as hr_email, hc.personal_mobile as hr_mobile
@@ -190,7 +197,11 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
           hc.linkedin_url as hr_linkedin_url, hc.personal_email as hr_email,
           hc.personal_mobile as hr_mobile, hc.confidence_score as hr_confidence,
           jp.title as job_title, jp.description as job_description,
-          jp.experience_level, jp.salary_range, jp.job_url, jp.source_site
+          jp.experience_level, jp.salary_range, jp.job_url, jp.source_site,
+          jp.location, jp.city, jp.state, jp.country, jp.location_type,
+          jp.employment_type, jp.is_work_from_home, jp.apply_url, jp.posted_at,
+          jp.about_job, jp.department, jp.openings_count,
+          jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period
         FROM leads l
         JOIN companies c ON l.company_id = c.id
         LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id

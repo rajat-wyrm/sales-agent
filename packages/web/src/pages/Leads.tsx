@@ -10,7 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { leads as leadsApi, admin } from '@/lib/api';
 import { Lead } from '@/lib/types';
 import {
-  Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles,
+  Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles, MapPin,
   BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle, MoreVertical,
   Columns3, LayoutGrid, Download, Zap, ExternalLink, Phone, Copy, Check, Radar,
 } from 'lucide-react';
@@ -148,6 +148,27 @@ const Leads: React.FC = () => {
       <div className="min-w-0"><p className="truncate font-medium text-foreground">{info.getValue() || '—'}</p>{info.row.original.company_domain && <p className="truncate text-xs text-muted-foreground">{info.row.original.company_domain}</p>}</div>
     ) }),
     columnHelper.accessor('job_title', { header: 'Job Title', cell: (info) => <span className="line-clamp-1 text-muted-foreground">{info.getValue() || info.row.original.source_site || '—'}</span> }),
+    // Location + salary + experience were never surfaced in the table even after
+    // scraping them, so reps had to open each lead to tell if a role was worth
+    // working. Rendered compactly; blank rather than a fake placeholder.
+    columnHelper.display({ id: 'role', header: 'Role', cell: ({ row }) => {
+      const l = row.original;
+      const loc = [l.city, l.state].filter(Boolean).join(', ') || l.location;
+      return (
+        <div className="min-w-0 space-y-1">
+          <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+            <MapPin className="h-3 w-3 shrink-0" />
+            <span className="truncate">{loc || '—'}</span>
+            {l.location_type && <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px] capitalize">{l.location_type}</Badge>}
+          </div>
+          {l.experience_level && <p className="truncate text-[11px] text-muted-foreground">{l.experience_level}</p>}
+        </div>
+      );
+    } }),
+    columnHelper.accessor('salary_range', { header: 'Salary', cell: (info) => {
+      const v = info.getValue();
+      return v ? <span className="whitespace-nowrap text-[12px] font-medium text-success">{v}</span> : <span className="text-[12px] text-muted-foreground">—</span>;
+    } }),
     columnHelper.accessor('hr_name', { header: 'HR Contact', cell: (info) => {
       const lead = info.row.original;
       return lead.hr_name ? (

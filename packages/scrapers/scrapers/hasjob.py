@@ -10,6 +10,7 @@ Company identity comes from the entry id path (hasjob.co/<companydomain>/<code>)
 corroborated by the content header link. Single fetch per run.
 """
 
+import html
 import re
 import asyncio
 import aiohttp
@@ -104,7 +105,7 @@ class HasjobScraper(BaseScraper):
                 "company_mobile": "",
                 "hr_linkedin_url": "",
                 "job_title": parsed["title"],
-                "about_job": re.sub(r"<[^>]+>", " ", parsed["content"])[:1500],
+                "about_job": html.unescape(re.sub(r"<[^>]+>", " ", parsed["content"]))[:1500],
                 "experience_required": "",
                 "location": parsed["location"],
                 "salary_range": "",

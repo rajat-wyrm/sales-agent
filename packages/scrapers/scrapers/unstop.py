@@ -8,6 +8,7 @@ company, and experience filters.
 Extracts per SRS §4.4 schema.
 """
 
+import html
 import json
 import re
 import asyncio
@@ -99,7 +100,7 @@ class UnstopScraper(BaseScraper):
 
             # Strip HTML from details for about_job
             raw_details = item.get("details") or ""
-            about = re.sub(r"<[^>]+>", " ", raw_details)
+            about = html.unescape(re.sub(r"<[^>]+>", " ", raw_details))
             about = re.sub(r"\s+", " ", about).strip()[:500]
 
             is_fresher = is_fresher_role(title, exp_str, about.lower())

@@ -7,6 +7,7 @@ with the custom `experience_level` taxonomy to target fresher roles (ID 406).
 Extracts per SRS §4.4 schema.
 """
 
+import html
 import json
 import re
 import asyncio
@@ -76,10 +77,12 @@ class JobinsiderScraper(BaseScraper):
                 return None
 
             link = item.get("link", "")
-            excerpt = re.sub(r"<[^>]+>", " ", item.get("excerpt", {}).get("rendered", ""))
+            # Strip tags AND decode entities: removing only <tags> left &amp; /
+            # &#8217; literals in the text, which the CRM then rendered verbatim.
+            excerpt = html.unescape(re.sub(r"<[^>]+>", " ", item.get("excerpt", {}).get("rendered", "")))
             excerpt = re.sub(r"\s+", " ", excerpt).strip()[:500]
 
-            content_text = re.sub(r"<[^>]+>", " ", item.get("content", {}).get("rendered", ""))
+            content_text = html.unescape(re.sub(r"<[^>]+>", " ", item.get("content", {}).get("rendered", "")))
             content_text = re.sub(r"\s+", " ", content_text).strip()[:800]
             about_job = content_text if len(content_text) > len(excerpt) else excerpt
 

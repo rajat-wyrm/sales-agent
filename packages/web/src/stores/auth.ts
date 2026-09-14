@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { resetRealtime } from '@/hooks/useSSE';
 import { User, LoginResponse } from '@/lib/types';
 import api, { auth as authApi } from '@/lib/api';
 
@@ -43,6 +44,12 @@ export const useAuthStore = create<AuthState>()(
       logout: async () => {
         set({ user: null, token: null, refreshToken: null, isAuthenticated: false });
         delete api.defaults.headers.common['Authorization'];
+        // Close the shared realtime stream explicitly: useSSE only opens on a
+        // token change and never tears down on sign-out (so that one page
+        // mounting signed-out cannot kill another's connection), so this is the
+        // single place that must. Without it a logged-out browser keeps
+        // receiving lead events until reload.
+        resetRealtime();
       },
 
       // Ask the server to blacklist the current access token. Only for

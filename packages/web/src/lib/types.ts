@@ -78,6 +78,26 @@ export interface Lead {
   experience_level: string | null;
   salary_range: string | null;
   job_url: string | null;
+
+  // Posting facets. The API now returns these; they were absent from the model,
+  // so the UI had no way to show where a job is, what it pays, or when it was
+  // posted even though the scraper had captured some of it.
+  location?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  location_type?: 'remote' | 'onsite' | 'hybrid' | null;
+  employment_type?: string | null;
+  is_work_from_home?: boolean | null;
+  apply_url?: string | null;
+  posted_at?: string | null;
+  about_job?: string | null;
+  department?: string | null;
+  openings_count?: number | null;
+  salary_min?: number | string | null;
+  salary_max?: number | string | null;
+  salary_currency?: string | null;
+  salary_period?: string | null;
 }
 
 export interface LeadDetail extends Lead {

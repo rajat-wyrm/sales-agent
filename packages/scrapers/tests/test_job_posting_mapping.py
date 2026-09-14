@@ -1,0 +1,169 @@
+"""Salary/location mapping from scraped text -> job_postings columns.
+
+These cases are all real shapes produced by the sources wired into SCRAPER_MAP;
+the Indian-scale conversions and the "do not invent a salary" guards are the
+parts most likely to regress silently.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pytest
+
+from scrapers.normalizer import job_posting_columns, normalize_lead  # noqa: E402
+
+
+def _cols(raw: dict) -> dict:
+    return job_posting_columns(normalize_lead({
+        "company_name": "Acme", "job_title": "Engineer", "url": "https://x/1",
+        "location": "Pune", **raw,
+    }))
+
+
+def test_lakh_range_with_trailing_unit():
+    # "₹25-45 LPA" puts the unit on the last number only; both ends must scale.
+    c = _cols({"about_job": "Salary: Not Disclosed (₹25-45 LPA)"})
+    assert (c["salary_min"], c["salary_max"]) == (2_500_000.0, 4_500_000.0)
+    assert c["salary_currency"] == "INR"
+    assert c["salary_period"] == "year"
+
+
+def test_lakh_on_both_ends():
+    c = _cols({"about_job": "Package 8 LPA to 12 LPA"})
+    assert (c["salary_min"], c["salary_max"]) == (800_000.0, 1_200_000.0)
+
+
+def test_decimal_lakh_and_crore():
+    assert (_cols({"about_job": "CTC: 3.5 - 6 lakh per annum"})["salary_min"]) == 350_000.0
+    assert (_cols({"about_job": "1 - 2 crore package"})["salary_max"]) == 20_000_000.0
+
+
+def test_thousands_suffix():
+    c = _cols({"about_job": "Salary 50k - 80k"})
+    assert (c["salary_min"], c["salary_max"]) == (50_000.0, 80_000.0)
+
+
+def test_ctc_fields_are_already_lakhs():
+    # AmbitionBox sends minCtc/maxCtc as plain lakh figures.
+    c = _cols({"about_job": "role", "raw_payload": {"minCtc": 8, "maxCtc": 14}})
+    assert (c["salary_min"], c["salary_max"]) == (800_000.0, 1_400_000.0)
+
+
+def test_structured_salary_range_usd():
+    c = _cols({"about_job": "x", "salary_range": "$80,000 - $120,000 per year"})
+    assert (c["salary_min"], c["salary_max"], c["salary_currency"]) == (80_000.0, 120_000.0, "USD")
+
+
+def test_no_salary_invented_from_non_money_numbers():
+    """The dangerous failure: reading "0-2 years" or a batch year as pay."""
+    for text in (
+        "Open to 0-2 years, B.Tech 2026 batch",
+        "Experience 1-3 years required",
+        "For 2023-2026 batch passouts",
+        "Great fresher role in Bengaluru",
+    ):
+        c = _cols({"about_job": text})
+        assert c["salary_min"] is None and c["salary_max"] is None, text
+
+
+def test_location_from_array_of_objects():
+    c = _cols({"location": "", "about_job": "x",
+               "raw_payload": {"locations": [{"location": "Chennai"}, {"location": "Bangalore"}]}})
+    assert c["location"] == "Chennai, Bangalore"
+
+
+def test_workplace_type_variants():
+    assert _cols({"about_job": "x", "raw_payload": {"workMode": "Hybrid"}})["location_type"] == "hybrid"
+    assert _cols({"about_job": "x", "raw_payload": {"workplaceType": "wfh"}})["location_type"] == "remote"
+    assert _cols({"about_job": "x", "raw_payload": {"typeOfEmployment": "On-site"}})["location_type"] == "onsite"
+
+
+def test_hybrid_inferred_from_description():
+    c = _cols({"about_job": "Internship in Gurugram on a hybrid work setup"})
+    assert c["location_type"] == "hybrid"
+
+
+def test_apply_url_falls_back_to_job_url():
+    c = _cols({"about_job": "x", "raw_payload": {"applyUrl": "https://apply/here"}})
+    assert c["apply_url"] == "https://apply/here"
+
+
+def test_posted_at_accepts_iso_and_epoch_ms():
+    assert _cols({"about_job": "x", "raw_payload": {"posted_at": "2026-09-02"}})["posted_at"] is not None
+    assert _cols({"about_job": "x", "raw_payload": {"published_at": 1757900000000}})["posted_at"] is not None
+    assert _cols({"about_job": "x", "raw_payload": {"posted_at": "not a date"}})["posted_at"] is None
+
+
+# --- location flattening -----------------------------------------------------
+# Boards send location as a string, an object, a {code,name} pair, a list of
+# those, or JSON double-encoded inside a string. Anything non-string that reached
+# job_postings.location printed braces in the CRM.
+
+def test_location_object_prefers_fulllocation():
+    from scrapers.normalizer import _flatten_location as F
+    assert F({"city": "Bengaluru", "region": "KA", "country": "in",
+              "fullLocation": "Bengaluru, KA, India"}) == "Bengaluru, KA, India"
+
+
+def test_location_object_variants():
+    from scrapers.normalizer import _flatten_location as F
+    assert F({"code": "IN", "name": "India"}) == "India"
+    assert F({"country": {"code": "us", "name": "United States"}}) == "United States"
+    assert F({"city": "Pune"}) == "Pune"
+    assert F([{"location": "Chennai"}, {"location": "Pune"}]) == "Chennai, Pune"
+    assert F("Mumbai") == "Mumbai"
+    assert F('{"city":"Hyderabad","country":"in"}') == "Hyderabad, in"
+    assert F("") == "" and F(None) == "" and F({}) == ""
+
+
+def test_location_column_never_contains_json_braces():
+    # Empty top-level location so the mapper falls through to raw_payload.
+    n = normalize_lead({"company_name": "C", "job_title": "T", "url": "https://x",
+                        "about_job": "x", "location": "",
+                        "raw_payload": {"location": {"city": "Bengaluru", "region": "KA",
+                                                     "fullLocation": "Bengaluru, KA, India"}}})
+    c = job_posting_columns(n)
+    assert "{" not in (c["location"] or "") and "}" not in (c["location"] or "")
+    assert c["location"] == "Bengaluru, KA, India"
+
+
+def test_normalize_lead_flattens_dict_location():
+    n = normalize_lead({"company_name": "C", "job_title": "T", "url": "https://x",
+                        "about_job": "d", "location": {"city": "Noida", "region": "UP"}})
+    assert isinstance(n["location"], str) and "{" not in n["location"]
+
+
+# --- salary false-positive guards -------------------------------------------
+# Real corpus text from internship sources. A loose numeric scan turned these
+# into salaries (e.g. "1-2 Months" -> a ₹1–₹2 band), which is worse than NULL:
+# it silently corrupts ranking and any salary-sorted view.
+
+NON_MONEY_TEXTS = [
+    "This internship runs for a duration of 1-2 Months.",
+    "This one’s open to recent graduates from the 2026 and 2027 batches.",
+    "Open to 0-2 years, B.Tech 2026 batch",
+    "For 2023-2026 batch passouts",
+    "Duration: 6 Months, location Bengaluru, hybrid",
+    "Great fresher role in Bengaluru",
+]
+
+
+@pytest.mark.parametrize("text", NON_MONEY_TEXTS)
+def test_non_money_text_never_becomes_a_salary(text):
+    c = _cols({"about_job": text})
+    assert c["salary_min"] is None, f"invented salary {c['salary_min']} from: {text}"
+    assert c["salary_max"] is None
+
+
+def test_trailing_unit_phrase_parses():
+    # Anchor may sit after the numbers ("1 - 2 crore package").
+    c = _cols({"about_job": "Annual CTC 1 - 2 crore package"})
+    assert (c["salary_min"], c["salary_max"]) == (10_000_000.0, 20_000_000.0)
+
+
+def test_sub_thousand_band_rejected():
+    # Anything below ~₹1,000 cannot be pay; guard against anchored-but-duration
+    # phrasings such as "stipend within 1-2 months".
+    c = _cols({"about_job": "stipend within 1-2 months"})
+    assert c["salary_min"] is None
