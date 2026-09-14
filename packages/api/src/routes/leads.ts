@@ -12,7 +12,8 @@ import { calculateCandidateSimilarity } from '../utils/dedup';
 const paginationSchema = z.object({
   page: z.coerce.number().min(1).default(1),
   limit: z.coerce.number().min(1).max(200).default(50),
-  sort_by: z.enum(['lead_score', 'created_at', 'updated_at', 'company_name', 'job_title', 'source_site', 'hr_name']).default('created_at'),
+  sort_by: z.enum(['lead_score', 'created_at', 'updated_at', 'company_name', 'job_title', 'source_site',
+    'hr_name', 'location_type', 'salary_min', 'salary_max', 'posted_at']).default('created_at'),
   sort_order: z.enum(['asc', 'desc']).default('desc'),
   score_band: z.enum(['hot', 'warm', 'cold']).optional(),
   pipeline_stage: z
@@ -25,6 +26,14 @@ const paginationSchema = z.object({
   date_from: z.string().optional(),
   date_to: z.string().optional(),
   experience: z.string().optional(),
+  // Facets the scrapers now populate; without these the columns are display-only
+  // and a rep cannot actually slice a queue by "remote roles paying >5L".
+  location_type: z.enum(['remote', 'onsite', 'hybrid']).optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  department: z.string().optional(),
+  salary_min: z.coerce.number().min(0).optional(),
+  has_salary: z.coerce.boolean().optional(),
   filter: z.string().optional(),
 });
 
@@ -106,6 +115,38 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       values.push(q.experience);
       paramIdx++;
     }
+    if (q.location_type) {
+      conditions.push(`jp.location_type = $${paramIdx}`);
+      values.push(q.location_type);
+      paramIdx++;
+    }
+    if (q.city) {
+      conditions.push(`jp.city ILIKE $${paramIdx}`);
+      values.push(`%${q.city}%`);
+      paramIdx++;
+    }
+    if (q.state) {
+      conditions.push(`jp.state ILIKE $${paramIdx}`);
+      values.push(`%${q.state}%`);
+      paramIdx++;
+    }
+    if (q.department) {
+      conditions.push(`jp.department ILIKE $${paramIdx}`);
+      values.push(`%${q.department}%`);
+      paramIdx++;
+    }
+    if (q.salary_min != null) {
+      // COALESCE lets a source that only gives text still match on its numeric
+      // floor when one exists, and excludes rows with no pay data at all.
+      conditions.push(`COALESCE(jp.salary_min, NULL) >= $${paramIdx}`);
+      values.push(q.salary_min);
+      paramIdx++;
+    }
+    if (q.has_salary === true) {
+      conditions.push(`(jp.salary_min IS NOT NULL OR COALESCE(jp.salary_range, '') <> '')`);
+    } else if (q.has_salary === false) {
+      conditions.push(`(jp.salary_min IS NULL AND COALESCE(jp.salary_range, '') = '')`);
+    }
     if (q.filter) {
       conditions.push(`(c.name ILIKE $${paramIdx} OR c.domain ILIKE $${paramIdx} OR jp.title ILIKE $${paramIdx})`);
       values.push(`%${q.filter}%`);
@@ -122,9 +163,21 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       company_name: 'company_name',
       job_title: 'job_title',
       source_site: 'source_site',
+      // Whitelisted mapping only -- q.sort_by is validated by zod above and never
+      // interpolated directly, so ORDER BY cannot be injected. NULLS placement is
+      // appended after the direction (see nullsTail), not here.
+      location_type: 'jp.location_type',
+      salary_min: 'jp.salary_min',
+      salary_max: 'jp.salary_max',
+      posted_at: 'jp.posted_at',
       hr_name: 'hr_name',
     };
     const sortColumn = sortColumns[q.sort_by] || 'l.created_at';
+    // Nullable facets must push NULLs last in DESC (and first in ASC) or the
+    // default Postgres ordering makes "highest salary" return rows with no pay.
+    const nullsTail = ['salary_min', 'salary_max', 'posted_at'].includes(q.sort_by)
+      ? (q.sort_order === 'desc' ? ' NULLS LAST' : ' NULLS FIRST')
+      : '';
 
     const countQuery = `
       SELECT COUNT(*) as total
@@ -159,7 +212,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       JOIN job_postings jp ON l.job_posting_id = jp.id
       LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
       ${whereClause}
-      ORDER BY ${sortColumn} ${orderDir}
+      ORDER BY ${sortColumn} ${orderDir}${nullsTail}
       LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
     `, [...values, q.limit, offset] as any);
 

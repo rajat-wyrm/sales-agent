@@ -59,6 +59,10 @@ const Leads: React.FC = () => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [draftChannel, setDraftChannel] = useState<'email' | 'whatsapp' | 'both'>('both');
   const [experienceFilter, setExperienceFilter] = useState<'' | 'fresher' | '0-1yr' | '0-2yr' | 'no-experience'>('');
+  // Facets the API now supports; without UI for them the new columns were
+  // display-only and a rep could not actually slice a queue by work mode or pay.
+  const [workplaceFilter, setWorkplaceFilter] = useState<'' | 'remote' | 'onsite' | 'hybrid'>('');
+  const [salaryFilter, setSalaryFilter] = useState<'' | 'any' | '5' | '10' | '20'>('');
   const [visibility, setVisibility] = useState<VisibilityState>({});
   const [density, setDensity] = useState<Density>('comfortable');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -71,11 +75,13 @@ const Leads: React.FC = () => {
   const page = pagination.pageIndex + 1;
 
   const { data, isLoading, refetch, isFetching, isError, error } = useQuery(
-    ['leads', page, pagination.pageSize, sortParam, sortOrder, scoreBand, pipelineStage, sourceSite, globalFilter, experienceFilter],
+    ['leads', page, pagination.pageSize, sortParam, sortOrder, scoreBand, pipelineStage, sourceSite, globalFilter, experienceFilter, workplaceFilter, salaryFilter],
     () => leadsApi.list({
       page, limit: pagination.pageSize, sort_by: sortParam as any, sort_order: sortOrder as any,
       score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
       filter: globalFilter || undefined, experience: experienceFilter || undefined,
+      location_type: workplaceFilter || undefined,
+      has_salary: salaryFilter === 'any' ? true : salaryFilter ? Number(salaryFilter) * 100000 : undefined,
     }),
     { staleTime: 15000, refetchInterval: 20000, onError: () => {} },
   );
@@ -231,6 +237,8 @@ const Leads: React.FC = () => {
       {/* toolbar */}
       <div className="card flex flex-wrap items-center gap-2 p-3">
         <Select value={experienceFilter} onChange={(e) => setExperienceFilter(e.target.value as never)} className="w-40" aria-label="Experience"><option value="">All experience</option><option value="fresher">Fresher</option><option value="0-1yr">0-1 years</option><option value="0-2yr">0-2 years</option><option value="no-experience">No experience</option></Select>
+        <Select value={workplaceFilter} onChange={(e) => setWorkplaceFilter(e.target.value as never)} className="w-32" aria-label="Workplace"><option value="">All workplaces</option><option value="remote">Remote</option><option value="onsite">On-site</option><option value="hybrid">Hybrid</option></Select>
+        <Select value={salaryFilter} onChange={(e) => setSalaryFilter(e.target.value as never)} className="w-36" aria-label="Salary"><option value="">Any salary</option><option value="any">Salary disclosed</option><option value="5">₹5L+</option><option value="10">₹10L+</option><option value="20">₹20L+</option></Select>
         <Select value={scoreBand || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'score_band'), ...(e.target.value ? [{ id: 'score_band', value: e.target.value }] : [])])} className="w-32" aria-label="Score"><option value="">All scores</option><option value="hot">Hot ≥70</option><option value="warm">Warm 40+</option><option value="cold">Cold</option></Select>
         <Select value={pipelineStage || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'pipeline_stage'), ...(e.target.value ? [{ id: 'pipeline_stage', value: e.target.value }] : [])])} className="w-40" aria-label="Stage"><option value="">All stages</option><option value="discovered">New</option><option value="enriched">Enriched</option><option value="verified">Verified</option><option value="drafted">Ready to send</option><option value="contacted">Sent</option><option value="replied">Replied</option><option value="bounced">Failed</option><option value="contact_unavailable">Needs enrichment</option><option value="verification_failed">Verify failed</option><option value="send_failed">Send failed</option><option value="suppressed">Suppressed</option></Select>
         <div className="h-6 w-px bg-border" />
