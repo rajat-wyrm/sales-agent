@@ -15,6 +15,7 @@ Updates:
 """
 
 import json
+import re
 import asyncio
 import logging
 import os
@@ -30,6 +31,70 @@ from .queue import chain_lead, requeue_or_dlq, reliable_brpop, ack, publish_even
 from .utils.redact import redact_email, redact_phone
 
 logger = logging.getLogger(__name__)
+
+
+TRANSIENT_SMTP = re.compile(
+    # Sender-side / temporary failures. Google answers a datacenter IP with
+    # "5.2.1 ... does not exist", which is reputation throttling and uses the
+    # same wording as a real recipient bounce; 5.7.x is policy rejection.
+    r"\b(4\d\d|5\.2\.\d|5\.7\.\d)\b|try again|temporar|rate.?limit|"
+    r"reputation|could not resolve|connection refused|timed out|"
+    r"unavailable for strategic",
+    re.I,
+)
+HARD_BOUNCE = re.compile(
+    # Only an explicit *recipient* rejection proves the mailbox is gone.
+    r"user unknown|no such user|not deliverable|mailbox unavailable|"
+    r"recipient address rejected|address (rejected|invalid)|"
+    r"\b5\.1\.1\b|\b5\.0\.0\b|\b550 5\.1\b",
+    re.I,
+)
+
+
+def classify_reacher_result(result: dict[str, Any]) -> str:
+    """Map one Reacher result object onto the SRS §6.1 email-status enum.
+
+    Pure and separated from the HTTP call so the reputation-vs-bounce rule below
+    is testable without a running Reacher or outbound SMTP. Treating any
+    smtp.error as invalid silently destroyed deliverable leads, because Reacher
+    reports our own egress problems in that same field.
+    """
+    if not isinstance(result, dict):
+        # Reacher can hand back a list, a string or an error body; never crash on
+        # shape, because an exception here aborts verification for the whole job.
+        return "unknown"
+    misc = result.get("misc") or {}
+    is_reachable = str(result.get("is_reachable", "unknown")).lower()
+    is_disposable = bool(misc.get("is_disposable", False))
+    is_role = bool(misc.get("is_role_account", False))
+
+    smtp = result.get("smtp")
+    smtp_raw = smtp.get("error") if isinstance(smtp, dict) else None
+    if isinstance(smtp_raw, dict):
+        smtp_msg = str(smtp_raw.get("message", ""))
+    elif smtp_raw is None:
+        smtp_msg = ""
+    else:
+        smtp_msg = str(smtp_raw)
+    has_smtp_error = bool(smtp_raw)
+
+    hard_bounce = has_smtp_error and not TRANSIENT_SMTP.search(smtp_msg) \
+        and bool(HARD_BOUNCE.search(smtp_msg))
+
+    if hard_bounce:
+        return "invalid"
+    if is_reachable == "true":
+        return "valid"
+    if is_reachable == "false":
+        return "disposable" if is_disposable else "invalid"
+    if is_reachable == "invalid":
+        return "invalid"
+    if is_reachable == "unknown":
+        if is_disposable:
+            return "disposable"
+        if is_role:
+            return "catch_all"
+    return "unknown"
 
 
 async def verify_email_reacher(email: str, reacher_url: str | None = None) -> dict[str, Any]:
@@ -53,31 +118,7 @@ async def verify_email_reacher(email: str, reacher_url: str | None = None) -> di
             data = resp.json()
             # Reacher returns a list of results: [{ is_reachable, misc, mx, smtp, syntax }]
             result = data[0] if isinstance(data, list) and len(data) > 0 else data
-            is_reachable = result.get("is_reachable", "unknown")
-            is_disposable = result.get("misc", {}).get("is_disposable", False)
-            is_role = result.get("misc", {}).get("is_role_account", False)
-            smtp_error = result.get("smtp", {}).get("error")
-
-            if smtp_error:
-                status = "invalid"
-            elif is_reachable == "true":
-                status = "valid"
-            elif is_reachable == "false":
-                if is_disposable:
-                    status = "disposable"
-                else:
-                    status = "invalid"
-            elif is_reachable == "invalid":
-                status = "invalid"
-            elif is_reachable == "unknown":
-                if is_disposable:
-                    status = "disposable"
-                elif is_role:
-                    status = "catch_all"
-                else:
-                    status = "unknown"
-            else:
-                status = "unknown"
+            status = classify_reacher_result(result)
 
             return {"status": status, "raw": result}
     except httpx.ConnectError:
