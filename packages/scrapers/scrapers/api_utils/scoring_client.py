@@ -39,11 +39,14 @@ def calculate_score(input_data: dict) -> dict[str, int | dict]:
         score += SCORING_WEIGHTS["company_contact"]
         breakdown["company_contact"] = {"points": SCORING_WEIGHTS["company_contact"], "reason": "Company official contact found"}
 
+    # Mirrors scoring.ts calculateLeadScore exactly (SRS §5.1: salary, full JD,
+    # valid job_url) -- keep the two in sync or a worker-computed score will
+    # disagree with the API's /score endpoint and bands will flip by code path.
     quality = min(
         SCORING_WEIGHTS["job_quality_max"],
-        (3 if input_data.get("salary_range") else 0) +
-        (4 if input_data.get("job_description") and len(input_data.get("job_description", "")) > 100 else 0) +
-        (3 if input_data.get("job_url") else 0),
+        (3 if input_data.get("salary_range") else 0)
+        + (4 if input_data.get("job_description") and len(str(input_data.get("job_description") or "")) > 100 else 0)
+        + (3 if input_data.get("job_url") else 0),
     )
     if quality > 0:
         score += quality

@@ -10,6 +10,9 @@ interface LeadScoreInput {
   salary_range?: string | null;
   job_description?: string | null;
   job_url?: string | null;
+  // Accepted for callers' convenience but deliberately NOT scoring signals:
+  // SRS §5.1 defines job quality as salary + full JD + valid job_url only.
+  // tests/test_scoring_parity.py asserts adding them cannot move a score.
   email_status?: string | null;
   whatsapp_status?: string | null;
 }
@@ -105,6 +108,8 @@ export function calculateLeadScore(input: LeadScoreInput, weights?: ScoringWeigh
   }
 
   const qUnit = w.job_quality / 10;
+  // SRS §5.1 defines this component as exactly "salary, full JD, valid job_url"
+  // (+10), so the 3/4/3 split stays as specified rather than being re-weighted.
   const qualityScore = Math.min(
     w.job_quality,
     Math.round((input.salary_range ? 3 : 0) * qUnit) +
