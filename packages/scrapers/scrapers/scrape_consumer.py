@@ -9,6 +9,7 @@ Per SRS §4.6: scrapers push raw records to raw_leads_queue.
 """
 
 import json
+import os
 import asyncio
 import logging
 from typing import Any
@@ -59,16 +60,48 @@ SCRAPER_MAP = {
     "workindia": ("scrapers.workindia", "WorkIndiaScraper"),
     "hirist": ("scrapers.hirist", "HiristScraper"),
     "classicjobs": ("scrapers.classicjobs", "ClassicJobsScraper"),
+    "hackerearth": ("scrapers.hackerearth", "HackerEarthScraper"),
 }
 DEFAULT_SOURCES = [
-    "remoteok", "github_jobs", "greenhouse", "lever", "naukri", "internshala",
-    "indeed", "foundit", "instahyre", "wellfound", "glassdoor", "shine",
-    "cutshort", "linkedin", "freshersworld",
-    "unstop", "jobinsider", "iimjobs",
-    "arbeitnow", "usajobs", "duckduckgo",
-    "ashby", "recruitee", "smartrecruiters", "breezy",
-    "timesjobs", "apna", "workindia", "hirist", "classicjobs",
+    # India-native fresher/entry-level portals (primary target).
+    "naukri", "internshala", "freshersworld", "apna", "workindia",
+    "shine", "timesjobs", "foundit", "instahyre", "cutshort",
+    "unstop", "iimjobs", "jobinsider", "hirist", "classicjobs",
+    "hackerearth",
+    # Public ATS career pages (real employer domains; India-filtered downstream,
+    # best source of postable HR contacts). Greenhouse/Lever/Workday/Ashby/etc.
+    "greenhouse", "lever", "workday", "ashby", "smartrecruiters",
+    # Discovery accelerators (India-keyed).
+    "indeed", "duckduckgo",
 ]
+
+# Global / US boards kept available but NOT in the India-fresher default set
+# (they're mostly filtered out by the India geo-gate, so running them daily just
+# burns egress). Enable explicitly via job["sources"] or SCRAPE_SOURCES.
+EXTRA_SOURCES = [
+    "remoteok", "github_jobs", "arbeitnow", "adzuna", "jooble",
+    "usajobs", "recruitee", "teamtailor", "breezy",
+    "glassdoor", "wellfound", "linkedin", "twitter", "telegram",
+    "reddit", "facebook", "whatsapp", "college_portals",
+]
+
+
+def resolve_sources(job_sources):
+    """Choose which sources a run scrapes.
+
+    Priority: explicit per-job list > SCRAPE_SOURCES env override > India-fresher
+    DEFAULT_SOURCES. Keeps the operator able to retune the fleet without a code
+    deploy (e.g. enable the global set, or narrow to a few reliable boards), and
+    ignores unknown names rather than crashing the run.
+    """
+    if job_sources:
+        return [x for x in job_sources if x in SCRAPER_MAP] or None
+    override = os.environ.get("SCRAPE_SOURCES", "").strip()
+    if override:
+        picked = [x.strip() for x in override.split(",") if x.strip() in SCRAPER_MAP]
+        if picked:
+            return picked
+    return DEFAULT_SOURCES
 
 
 async def run_scraper(source: str, redis_client: redis.Redis, db=None, requested_by: str | None = None) -> tuple[int, str | None]:
@@ -120,7 +153,7 @@ async def consume_scrape_queue(
 
             job = json.loads(raw[1])
             run_id = job.get("run_id", "unknown")
-            sources = job.get("sources") or DEFAULT_SOURCES
+            sources = resolve_sources(job.get("sources"))
             run_type = job.get("run_type", "manual")
             triggered_by = job.get("triggered_by")
 

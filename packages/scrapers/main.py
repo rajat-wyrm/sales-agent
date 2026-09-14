@@ -191,7 +191,15 @@ async def start_consumers():
         tasks.append(asyncio.create_task(daily_scrape_scheduler(redis_client, db_pool=db_pool)))
 
         if db_pool:
-            tasks.append(asyncio.create_task(consume_enrichment_queue(redis_client, db_pool)))
+            # Contact enrichment is the product priority, but the keyless OSINT
+            # cascade is latency-bound (crt.sh / search-engine timeouts), so a
+            # single consumer drains the queue ~1 lead/min. Run a small bounded
+            # pool to multiply throughput. ponytail: 4 is tuned to the 10-conn DB
+            # pool + shared search-engine rate limits; raise ENRICH_CONCURRENCY as
+            # paid-provider keys (which return instantly) are added.
+            _enrich_n = max(1, int(os.environ.get("ENRICH_CONCURRENCY", "4") or 4))
+            for _ in range(_enrich_n):
+                tasks.append(asyncio.create_task(consume_enrichment_queue(redis_client, db_pool)))
             tasks.append(asyncio.create_task(consume_verification_queue(redis_client, db_pool)))
             tasks.append(asyncio.create_task(consume_draft_queue(redis_client, db_pool)))
             tasks.append(asyncio.create_task(consume_send_queue(redis_client, db_pool)))

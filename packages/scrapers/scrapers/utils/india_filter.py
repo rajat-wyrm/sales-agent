@@ -29,7 +29,7 @@ INDIA_NATIVE_SOURCES = {
     "naukri", "shine", "internshala", "freshersworld", "instahyre",
     "cutshort", "foundit", "adzuna", "jooble", "indeed", "workday",
     "unstop", "jobinsider", "iimjobs", "timesjobs",
-    "apna", "workindia", "hirist", "classicjobs",
+    "apna", "workindia", "hirist", "classicjobs", "hackerearth",
 }
 
 # Strong positive India location signals.

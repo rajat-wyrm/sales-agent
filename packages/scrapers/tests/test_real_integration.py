@@ -281,15 +281,23 @@ class TestScraperMap:
         assert not missing, f"Missing Tier-2 scrapers in SCRAPER_MAP: {missing}"
 
     def test_all_tier2_default_sources(self):
-        from scrapers.scrape_consumer import DEFAULT_SOURCES
-        required = {
-            "naukri", "internshala", "indeed", "foundit", "instahyre",
-            "wellfound", "glassdoor", "shine", "cutshort", "linkedin",
-            "freshersworld",
-        }
+        from scrapers.scrape_consumer import DEFAULT_SOURCES, EXTRA_SOURCES
         default_set = set(DEFAULT_SOURCES)
+        required = {
+            # India-native fresher/entry-level portals + reliable career-page ATS
+            # must be in the daily default set.
+            "naukri", "internshala", "indeed", "foundit", "instahyre",
+            "shine", "cutshort", "freshersworld",
+            "apna", "workindia", "hackerearth", "greenhouse", "lever",
+        }
         missing = required - default_set
-        assert not missing, f"Missing Tier-2 sources in DEFAULT_SOURCES: {missing}"
+        assert not missing, f"Missing India-fresher sources in DEFAULT_SOURCES: {missing}"
+        # US/global boards and ToS-hostile social sources are best-effort and are
+        # deliberately NOT scraped in the India-fresher daily default.
+        for off_target in ("usajobs", "remoteok", "arbeitnow", "linkedin",
+                           "twitter", "facebook"):
+            assert off_target not in default_set, f"{off_target} should not be a daily default"
+            assert off_target in set(EXTRA_SOURCES), f"{off_target} must stay opt-in via EXTRA_SOURCES"
 
     def test_srs_minimum_source_count(self):
         """SRS §16.1 requires >=15 sources."""
