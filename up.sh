@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# One-shot: start SSH server + build all images + start the full stack
+# up.sh - one-shot stack launcher for Linux/macOS.
+# Windows users: run .\up.ps1 in PowerShell instead. Same steps, same result.
+#
 # Usage: ./up.sh
 set -euo pipefail
 cd "$(dirname "$0")"

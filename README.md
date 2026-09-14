@@ -2,15 +2,35 @@
 
 Full-stack lead generation & outreach system: scrape job postings → enrich leads → verify emails → AI-draft outreach → send. Runs **entirely with one command**.
 
-```bash
-./up.sh
+| Your OS | Run this |
+|---|---|
+| **Linux / macOS** | `./up.sh` |
+| **Windows 10/11** (PowerShell) | `powershell -ExecutionPolicy Bypass -File .\up.ps1` |
+
+Both do the same thing:
+1. Builds all Docker images (API, Web, Workers)
+2. Starts the full stack (Postgres, Redis, API, Web, Workers, Reacher, n8n)
+3. Applies the database schema and migrations (idempotent — safe on every run)
+4. Bootstraps the admin login from `.env` (see [Login](#login))
+
+`up.sh` additionally starts the host SSH server on port 22 — that step is Linux host ops and is deliberately absent from `up.ps1`, where it has no meaning under Docker Desktop.
+
+---
+
+## Login
+
+The launcher creates an admin account from these two `.env` values (idempotent — it no-ops if an admin already exists):
+
+```ini
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=ChangeMe!Admin2026
 ```
 
-That single command:
-1. Starts the SSH server (port 22)
-2. Builds all Docker images (API, Web, Workers)
-3. Starts the full stack (Postgres, Redis, API, Web, Workers, Reacher, n8n)
-4. Applies the database schema automatically (idempotent — safe on every run)
+Sign in at **http://localhost:5173** with that email and password.
+
+> ⚠️ **Change both before any non-local deployment.** They are development defaults committed in `.env.example`; anyone who reads this repo knows them.
+
+**Do not use "Register" to get in.** Self-registration always creates a `sales_rep`, and RBAC restricts a rep to leads assigned to them — on a fresh clone that means an empty Leads page even though scraping produced hundreds. Use the admin account above; create rep accounts from **Settings → Users** once you want scoped access.
 
 ---
 
@@ -18,15 +38,18 @@ That single command:
 
 | Tool | Why | Check |
 |---|---|---|
-| Docker Engine 24+ | Runs everything | `docker --version` |
+| Docker Engine 24+ / Docker Desktop | Runs everything | `docker --version` |
 | Docker Compose v2 | Orchestrates the stack | `docker compose version` |
-| `sudo` access | Starting SSH service (prompts once, only if port 22 is down) | — |
+| WSL2 backend enabled (Windows) | Required for Docker Desktop to run Linux containers | Docker Desktop → Settings → Resources |
+| `sudo` access (**Linux/macOS only**) | Starting SSH service (prompts once, only if port 22 is down) | — |
 
 No Node, Python, or Postgres install needed — everything runs in containers.
 
 ---
 
 ## Quick Start
+
+### Linux / macOS
 
 ```bash
 # 1. Get the code
@@ -38,15 +61,38 @@ cp .env.example .env
 # Edit .env — at minimum set:
 #   JWT_SECRET         (any long random string)
 #   ENCRYPTION_SECRET  (min 32 chars — encrypts API keys at rest)
+#   ADMIN_EMAIL / ADMIN_PASSWORD (the login above)
 # Optional but recommended: GEMINI_API_KEY, RESEND_API_KEY
 
 # 3. Start EVERYTHING
 ./up.sh
 ```
 
-Open **http://localhost:5173** → click **Register** → create your account → you're in.
+### Windows 10 / 11
 
-> **Heads-up:** first `./up.sh` run pulls base images and builds — takes a few minutes. Subsequent runs are fast (cached layers).
+Open **PowerShell** in the repo folder:
+
+```powershell
+# 1. Get the code
+git clone https://github.com/rajat-wyrm/sales-agent.git
+cd sales-agent
+
+# 2. Configure environment (notepad opens the file; saving is enough)
+Copy-Item .env.example .env
+notepad .env
+#    Set JWT_SECRET, ENCRYPTION_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD as above
+
+# 3. Start EVERYTHING
+powershell -ExecutionPolicy Bypass -File .\up.ps1
+```
+
+If you see *"running scripts is disabled on this system"*, use the `-ExecutionPolicy Bypass` form above (it applies to this one invocation only and does not change your system policy).
+
+Both launchers auto-create `.env` from `.env.example` if it is missing, then print a reminder to edit it.
+
+Then open **http://localhost:5173** and sign in with the [admin credentials](#login).
+
+> **Heads-up:** the first run pulls base images and builds — takes a few minutes. Subsequent runs are fast (cached layers).
 
 ---
 
@@ -124,6 +170,15 @@ docker compose down              # stop (data volumes kept)
 docker compose down -v           # stop AND wipe databases ⚠️
 ```
 
+On Windows the commands are identical except the launcher:
+
+```powershell
+.\up.ps1                         # start everything (idempotent — safe to re-run anytime)
+docker compose ps
+docker compose logs -f api
+# PowerShell equivalent of `| head` is `| Select-Object -First 20`
+```
+
 Full rebuild after code changes:
 ```bash
 docker compose up -d --build
@@ -144,9 +199,9 @@ Schema is auto-applied on every `./up.sh` from `packages/api/database/schema/` (
 
 ---
 
-## SSH Access
+## SSH Access (Linux host only)
 
-`./up.sh` ensures the SSH server is listening on port 22.
+`./up.sh` ensures the SSH server is listening on port 22. `up.ps1` does not touch SSH — on Windows this stack runs inside Docker Desktop and there is no host SSH service to manage.
 
 ```bash
 ssh rajat@<host-ip>        # from another machine on your network
@@ -241,10 +296,27 @@ CI (`.github/workflows/ci.yml`) runs these plus Docker image builds (pushed to `
 ## Security Notes
 
 - `.env` holds secrets — it's gitignored; never commit it
+- **`ADMIN_EMAIL` / `ADMIN_PASSWORD` ship as known defaults** (see [Login](#login)). Change them before anything leaves your machine.
 - API keys entered in **Settings** are encrypted at rest (AES-256-GCM via `ENCRYPTION_SECRET`)
 - Change `N8N_BASIC_AUTH_PASSWORD` and both secrets before any real use
 - Postgres/Redis ports are exposed for local dev only — don't do that in prod
+- `/api/metrics`, `/api/integrity` and all DLQ routes are admin-gated; metrics emit aggregates only (no emails, names or lead ids)
 
-## License / Status
+---
 
-Phase 0 (revalidation + pipeline skeleton complete, see `PROGRESS.md`). Built per `HireGen-LeadGen-SRS-v1.0.md` — compliance details in `docs/SRS_COMPLIANCE_GATE.md`.
+## Status
+
+**Phase 0 complete** (revalidation + pipeline skeleton, see `PROGRESS.md`), and the six-program follow-on is **implemented, tested and verified end to end**. Built per `HireGen-LeadGen-SRS-v1.0.md`; compliance details in `docs/SRS_COMPLIANCE_GATE.md`, per-track design records in `docs/superpowers/specs/`.
+
+| Track | Delivered |
+|---|---|
+| 1 Durability | Redis AOF (`everysec`) on a named volume; crash-safe queues — jobs move to `:processing` on pop and are acked only after DB commit, with boot reclaim of stranded work |
+| 2 Sources | 48 sources wired, 29 in the daily default rotation — India-first (Naukri, Internshala, Freshersworld, Apna, WorkIndia, Shine, TimesJobs, Foundit, InstaHyre, CutShort, Unstop, IIMJobs, JobInsider, Hirist, ClassicJobs, HackerEarth, AmbitionBox, OffCampus, HasJob) plus global ATS/API coverage (Greenhouse, Lever, Workday, Ashby, SmartRecruiters, BambooHR, Personio, Recruitee, Teamtailor, Breezy, RemoteOK, Arbeitnow, Adzuna, Jooble, Wellfound, Glassdoor, DuckDuckGo/Google dorks, Amazon, LinkedIn/Twitter/Telegram surfaces). ATS board hosts can no longer leak into employer-domain lookups |
+| 3 Reliability | `parser_version` + `content_hash` snapshotting, `GET /api/integrity` (stuck leads + queue depths), audited DLQ inspect/redrive/purge |
+| 4 Search | Trigram GIN on `hr_contacts(full_name, personal_email)`; planner usage proven by test |
+| 5 Observability | Dependency-free Prometheus exposition at `GET /api/metrics` |
+| 6 Resilience | Stale-token rejection with one 401 contract, client refresh-and-retry, offline banner, unsent drafts backed up to localStorage |
+
+**Verification:** api `tsc` clean + jest 96/96 · web `tsc` clean + jest 17/17 + vite build ok · scrapers pytest 307/307 · migrations idempotent on re-run · live browser check of login, auth recovery, dashboard counts and draft-backup round-trip.
+
+**Still requires user-supplied keys** (queues and UI work without them; calls are skipped): Gemini drafts, Resend/Brevo sending, Snov.io / ContactOut enrichment, WhatsApp pairing.
