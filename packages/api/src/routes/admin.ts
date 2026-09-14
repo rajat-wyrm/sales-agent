@@ -204,7 +204,41 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.get('/sources/health', async (_req, _reply) => {
+  // ---- Provider status (rep-safe): which paid/sending/AI providers are
+  // configured, as booleans ONLY. No secrets, no masked tails — safe for
+  // sales_rep so the UI can badge choices and warn before spending/queueing.
+  fastify.get('/providers/status', { preValidation: [authorize(['admin', 'sales_rep'])] }, async (req, _reply) => {
+    const sql = getDB();
+    let userKeys: Record<string, unknown> = {};
+    try {
+      const rows = await sql.unsafe(`SELECT api_keys FROM users WHERE id = $1`, [
+        (req.user as { id: string }).id,
+      ]);
+      const raw = (rows as unknown as Array<{ api_keys: unknown }>)[0]?.api_keys;
+      userKeys = (typeof raw === 'string' ? JSON.parse(raw) : raw || {}) as Record<string, unknown>;
+    } catch { /* no keys readable -> all false unless env provides */ }
+    const hasKey = (userKey: string, ...envs: string[]) =>
+      Boolean(userKeys[userKey]) || envs.some((e) => Boolean(process.env[e]));
+    return {
+      enrichment: {
+        contactout: hasKey('contactout', 'CONTACT_OUT_API_KEY'),
+        snovio: hasKey('snovio', 'SNOVIO_API_KEY'),
+        hunter: hasKey('hunter', 'HUNTER_API_KEY'),
+        apollo: hasKey('apollo', 'apollo_io', 'APOLLO_API_KEY'),
+        lusha: hasKey('lusha', 'LUSHA_API_KEY'),
+        rocketreach: hasKey('rocketreach', 'ROCKETREACH_API_KEY'),
+        prospeo: hasKey('prospeo', 'PROSPEO_API_KEY'),
+        findymail: hasKey('findymail', 'FINDYMAIL_API_KEY'),
+      },
+      sending: {
+        email: hasKey('resend', 'RESEND_API_KEY') || hasKey('brevo', 'BREVO_API_KEY'),
+        whatsapp: hasKey('whatsapp', 'WHATSAPP_WEB_URL'),
+      },
+      ai: { gemini: hasKey('gemini', 'GEMINI_API_KEY') },
+    };
+  });
+
+  fastify.get('/sources/health', { preValidation: [authorize(['admin'])] }, async (_req, _reply) => {
     const sql = getDB();
     const health = await sql.unsafe(`
       SELECT source_name, consecutive_failures, circuit_open_until, last_success_at, last_failure_reason
@@ -328,11 +362,20 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
       [normalized, channel, reason],
     );
     // Also flag matching leads do_not_contact so in-flight leads stop immediately.
-    if (channel !== 'whatsapp') {
+    // ponytail: two targeted UPDATEs (email + phone) instead of one generic join.
+    if (channel === 'email' || channel === 'any') {
       await sql.unsafe(
         `UPDATE leads SET do_not_contact = true, updated_at = NOW()
          WHERE id IN (SELECT l.id FROM leads l JOIN hr_contacts hc ON l.hr_contact_id = hc.id
                       WHERE lower(hc.personal_email) = $1)`,
+        [normalized],
+      );
+    }
+    if (channel === 'whatsapp' || channel === 'any') {
+      await sql.unsafe(
+        `UPDATE leads SET do_not_contact = true, updated_at = NOW()
+         WHERE id IN (SELECT l.id FROM leads l JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+                      WHERE regexp_replace(lower(hc.personal_mobile), '[^0-9]', '', 'g') = regexp_replace($1, '[^0-9]', '', 'g'))`,
         [normalized],
       );
     }
@@ -359,5 +402,208 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
       resource_id: idResult.data,
     });
     return { message: 'Suppression removed' };
+  });
+
+  // ---- Integrity dashboard: stuck leads + queue depths (Track 3) ----
+  // Log-FK cascades make true orphans impossible, so this reports what can
+  // actually go wrong: leads parked in transient stages (crashed workers,
+  // pre-reclaim era) and jobs piling up in DLQ/:processing lists.
+  const PIPELINE_QUEUES = [
+    'scrape_queue:requests', 'raw_leads_queue:requests',
+    'enrichment_queue:requests', 'verification_queue:requests',
+    'draft_queue:requests', 'send_queue:requests', 'verify_send_queue:requests',
+  ];
+
+  fastify.get('/integrity', { preValidation: [authorize(['admin'])] }, async (_req, _reply) => {
+    const sql = getDB();
+    const redis = getRedis();
+    const stuck = await sql.unsafe(
+      `SELECT id, pipeline_stage, updated_at FROM leads
+        WHERE pipeline_stage IN ('enriching','verifying','send_pending','retry_pending')
+          AND updated_at < NOW() - INTERVAL '6 hours'
+        ORDER BY updated_at ASC LIMIT 100`,
+    );
+    const queues: Record<string, { depth: number; processing: number; dlq: number }> = {};
+    for (const q of PIPELINE_QUEUES) {
+      try {
+        const [depth, processing, dlq] = await Promise.all([
+          redis.llen(q), redis.llen(`${q}:processing`), redis.llen(`${q}:dlq`),
+        ]);
+        queues[q] = { depth: Number(depth), processing: Number(processing), dlq: Number(dlq) };
+      } catch {
+        queues[q] = { depth: -1, processing: -1, dlq: -1 };
+      }
+    }
+    // ATS flywheel: boards spotted in recently ingested job URLs. This is the
+    // raw sighting list (may include already-probed boards); the curated
+    // new-slug diff lives in scrapers/utils/ats_corpus.py suggest_new_slugs.
+    // Either way these are suggestions only — promotion follows the standing
+    // rule (verify live, then add to SOURCE_EXTRAS).
+    const ATS_PATTERNS: Array<[string, RegExp]> = [
+      ['greenhouse', /boards\.greenhouse\.io\/([a-z0-9][a-z0-9\-_]*)/i],
+      ['lever', /jobs\.lever\.co\/([a-z0-9][a-z0-9\-_]*)/i],
+      ['bamboohr', /([a-z0-9][a-z0-9\-_]*)\.bamboohr\.com\/careers/i],
+      ['personio', /([a-z0-9][a-z0-9\-_]*)\.jobs\.personio\.com/i],
+      ['ashby', /jobs\.ashbyhq\.com\/([a-z0-9][a-z0-9\-_]*)/i],
+    ];
+    const suggested_slugs: Record<string, string[]> = {};
+    try {
+      const urls = await sql.unsafe(
+        `SELECT DISTINCT job_url FROM job_postings
+          WHERE created_at > NOW() - INTERVAL '30 days' AND job_url IS NOT NULL LIMIT 2000`,
+      );
+      const seen = new Set<string>();
+      for (const row of urls as unknown as Array<{ job_url: string }>) {
+        const url = row.job_url || '';
+        for (const [ats, rx] of ATS_PATTERNS) {
+          const m = rx.exec(url);
+          if (m && m[1]) {
+            const key = `${ats}:${m[1].toLowerCase()}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              (suggested_slugs[ats] = suggested_slugs[ats] || []).push(m[1].toLowerCase());
+            }
+          }
+        }
+      }
+    } catch { /* job_postings unreadable: omit suggestions, don't fail */ }
+    return { stuck_leads: stuck, queues, suggested_slugs };
+  });
+
+  // ---- DLQ operations: inspect, redrive, purge (all audited) ----
+  const dlqQueueSchema = z.object({
+    queue: z.enum([
+      'scrape_queue:requests', 'raw_leads_queue:requests',
+      'enrichment_queue:requests', 'verification_queue:requests',
+      'draft_queue:requests', 'send_queue:requests', 'verify_send_queue:requests',
+    ]),
+  });
+
+  fastify.get('/dlq/:queue', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const parsed = dlqQueueSchema.safeParse(req.params);
+    if (!parsed.success) return reply.status(400).send({ error: 'Unknown queue' });
+    const redis = getRedis();
+    const items = await redis.lrange(`${parsed.data.queue}:dlq`, 0, 49);
+    return { queue: parsed.data.queue, dlq_depth: await redis.llen(`${parsed.data.queue}:dlq`), items };
+  });
+
+  fastify.post('/dlq/:queue/redrive', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const parsed = dlqQueueSchema.safeParse(req.params);
+    if (!parsed.success) return reply.status(400).send({ error: 'Unknown queue' });
+    const { queue } = parsed.data;
+    const redis = getRedis();
+    let moved = 0;
+    for (;;) {
+      // Consumers do LPUSH/BRPOP (take the TAIL), and rpoplpush lands the item
+      // at the HEAD — the starving end. Move it to the tail with a single
+      // atomic RPOPLPUSH back into the queue, then reset the attempt counter
+      // in place at index 0 where it now sits.
+      const item = await redis.rpoplpush(`${queue}:dlq`, queue);
+      if (item == null) break;
+      try {
+        const payload = JSON.parse(typeof item === 'string' ? item : String(item));
+        delete payload._attempts;
+        await redis.lrem(queue, 1, item); // remove from head
+        await redis.rpush(queue, JSON.stringify(payload)); // re-queue at the consumer end
+      } catch {
+        break; // unparseable as JSON after move — leave it, don't loop forever
+      }
+      moved += 1;
+      if (moved >= 1000) break;
+    }
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'dlq_redrive',
+      resource_type: 'queue',
+      resource_id: queue,
+      details: { moved },
+    });
+    return { queue, redriven: moved };
+  });
+
+  fastify.delete('/dlq/:queue', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const parsed = dlqQueueSchema.safeParse(req.params);
+    if (!parsed.success) return reply.status(400).send({ error: 'Unknown queue' });
+    const { queue } = parsed.data;
+    const redis = getRedis();
+    const depth = await redis.llen(`${queue}:dlq`);
+    await redis.del(`${queue}:dlq`);
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'dlq_purge',
+      resource_type: 'queue',
+      resource_id: queue,
+      details: { purged: Number(depth) },
+    });
+    return { queue, purged: Number(depth) };
+  });
+
+  // ---- Prometheus metrics (Track 5, dependency-free exposition format) ----
+  // Aggregates only — no PII. Admin-gated; point Prometheus at this target
+  // with a bearer token (see docs/BACKUP_RESTORE.md companion note in README).
+  fastify.get('/metrics', { preValidation: [authorize(['admin'])] }, async (_req, reply) => {
+    const sql = getDB();
+    const redis = getRedis();
+    const lines: string[] = [];
+    const gauge = (name: string, labels: Record<string, string>, value: number) => {
+      const lbl = Object.entries(labels).map(([k, v]) => `${k}="${String(v).replace(/"/g, '')}"`).join(',');
+      lines.push(`${name}{${lbl}} ${value}`);
+    };
+
+    const stages = await sql.unsafe(
+      `SELECT pipeline_stage, COUNT(*) AS n FROM leads GROUP BY pipeline_stage`,
+    );
+    for (const r of stages as unknown as Array<{ pipeline_stage: string; n: string }>) {
+      gauge('hiregen_leads_total', { stage: r.pipeline_stage }, Number(r.n));
+    }
+    const bands = await sql.unsafe(
+      `SELECT score_band, COUNT(*) AS n FROM leads GROUP BY score_band`,
+    );
+    for (const r of bands as unknown as Array<{ score_band: string; n: string }>) {
+      gauge('hiregen_leads_score_band', { band: r.score_band }, Number(r.n));
+    }
+    for (const q of PIPELINE_QUEUES) {
+      try {
+        const [depth, processing, dlq] = await Promise.all([
+          redis.llen(q), redis.llen(`${q}:processing`), redis.llen(`${q}:dlq`),
+        ]);
+        gauge('hiregen_queue_depth', { queue: q, state: 'pending' }, Number(depth));
+        gauge('hiregen_queue_depth', { queue: q, state: 'processing' }, Number(processing));
+        gauge('hiregen_queue_depth', { queue: q, state: 'dlq' }, Number(dlq));
+      } catch { /* redis down: omit, don't fail the scrape */ }
+    }
+    const stuck = await sql.unsafe(
+      `SELECT COUNT(*) AS n FROM leads
+        WHERE pipeline_stage IN ('enriching','verifying','send_pending','retry_pending')
+          AND updated_at < NOW() - INTERVAL '6 hours'`,
+    );
+    gauge('hiregen_stuck_leads', {}, Number((stuck as unknown as Array<{ n: string }>)[0]?.n ?? 0));
+    const health = await sql.unsafe(
+      `SELECT source_name, consecutive_failures, circuit_open_until FROM source_health`,
+    );
+    const now = Date.now();
+    for (const r of health as unknown as Array<{ source_name: string; consecutive_failures: string | number; circuit_open_until: string | null }>) {
+      gauge('hiregen_source_failures', { source: r.source_name }, Number(r.consecutive_failures ?? 0));
+      gauge('hiregen_source_circuit_open', { source: r.source_name },
+        r.circuit_open_until && new Date(r.circuit_open_until).getTime() > now ? 1 : 0);
+    }
+    const verif = await sql.unsafe(
+      `SELECT channel, result, COUNT(*) AS n FROM verification_log
+        WHERE created_at > NOW() - INTERVAL '24 hours' GROUP BY channel, result`,
+    );
+    for (const r of verif as unknown as Array<{ channel: string; result: string; n: string }>) {
+      gauge('hiregen_verifications_24h', { channel: r.channel, result: r.result }, Number(r.n));
+    }
+    const outreach = await sql.unsafe(
+      `SELECT channel, delivery_status, COUNT(*) AS n FROM outreach_log
+        WHERE sent_at > NOW() - INTERVAL '24 hours' GROUP BY channel, delivery_status`,
+    );
+    for (const r of outreach as unknown as Array<{ channel: string; delivery_status: string; n: string }>) {
+      gauge('hiregen_outreach_24h', { channel: r.channel, status: r.delivery_status }, Number(r.n));
+    }
+    const supp = await sql.unsafe(`SELECT COUNT(*) AS n FROM suppressions`);
+    gauge('hiregen_suppressions_total', {}, Number((supp as unknown as Array<{ n: string }>)[0]?.n ?? 0));
+
+    return reply.type('text/plain; version=0.0.4').send(lines.join('\n') + '\n');
   });
 };

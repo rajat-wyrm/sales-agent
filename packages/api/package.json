@@ -11,7 +11,7 @@
     "start": "node --import tsx watch.ts",
     "lint": "tsc --noEmit",
     "test": "jest --config test/jest.config.cjs",
-    "migrate": "node-pg-migrate -c database/config/migrate-config.cjs",
+    "migrate": "node --import tsx node_modules/node-pg-migrate/bin/node-pg-migrate -c database/config/migrate-config.cjs -m database/migrations --ignore-pattern \"README.md\" up",
     "seed:admin": "tsx src/scripts/seedAdmin.ts"
   },
   "dependencies": {
