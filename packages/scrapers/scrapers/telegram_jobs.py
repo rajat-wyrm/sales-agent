@@ -48,8 +48,13 @@ class TelegramScraper(BaseScraper):
         self._api_hash = api_hash
 
     async def scrape(self) -> list[dict[str, Any]]:
-        api_id = self._api_id
-        api_hash = self._api_hash
+        # Read env like every other optional-credential source; previously these
+        # were only ever settable as constructor arguments, so a key saved in
+        # Settings or .env could never enable this scraper.
+        import os
+
+        api_id = self._api_id or os.environ.get("TELEGRAM_API_ID", "")
+        api_hash = self._api_hash or os.environ.get("TELEGRAM_API_HASH", "")
 
         if not api_id or not api_hash:
             raise ScraperError(

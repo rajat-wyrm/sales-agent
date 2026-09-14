@@ -85,6 +85,15 @@ const DEFAULT_SCORING_WEIGHTS = {
   whatsapp_verified: 10,
 };
 
+/** Providers whose integration cannot work in this build. Surfacing it here beats
+ * showing a green "configured" badge for a key that will never be used -- each
+ * reason is verified against the live service, not assumed. */
+const UNAVAILABLE_PROVIDERS: Record<string, string> = {
+  contactout: 'ContactOut publishes no public REST API; set CONTACTOUT_API_URL if issued one',
+  twitter: 'X closed unauthenticated scraping; this source cannot return results',
+  whatsapp: 'Needs a self-hosted whatsapp-web.js service, which is not part of this stack',
+};
+
 const API_KEY_FIELDS: { name: string; label: string; placeholder?: string }[] = [
   { name: 'contactout', label: 'ContactOut API Key', placeholder: 'Auto-fill or leave blank' },
   { name: 'snovio', label: 'Snov.io API Key' },
@@ -340,7 +349,9 @@ const Settings: React.FC = () => {
               <div key={field.name}>
                 <label className="label" htmlFor={`key-${field.name}`}>
                   {field.label}
-                  {apiKeys[field.name] ? (
+                  {UNAVAILABLE_PROVIDERS[field.name] ? (
+                    <span className="ml-2 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-semibold text-warning" title={UNAVAILABLE_PROVIDERS[field.name]}>integration unavailable</span>
+                  ) : apiKeys[field.name] ? (
                     <span className="ml-2 rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-semibold text-success">configured</span>
                   ) : (
                     <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">not set</span>

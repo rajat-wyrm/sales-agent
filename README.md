@@ -159,6 +159,43 @@ All other variables have sensible defaults for local Docker use. **Never commit 
 
 ---
 
+## What happens automatically once you paste API keys
+
+Keys can be set in the **Settings page** (encrypted at rest) or via `.env`.
+Settings values take precedence. **No restart is needed** — workers read keys from
+the database on every job, so a key pasted mid-run applies to the next job.
+
+The pipeline is chained: each stage queues the next one automatically.
+
+```
+daily scrape (03:00 UTC) → normalise → enrich → verify → draft      [automatic]
+                                                        ↓
+                                                     send           [manual, always]
+```
+
+| Key you paste | What starts working, unprompted |
+|---|---|
+| `Gemini` | Drafts become AI-written and personalised per lead instead of falling back to the generic template. Applies to drafts generated from then on. |
+| `Snov.io` | Enrichment tries Snov.io first for an HR email before the free OSINT cascade. Costs credits per lookup. Needs the Email Finder entitlement on the account. |
+| `Resend` (`re_…`) or `Brevo` (`keysib-…`) | Sending works when you click Send / bulk Send. Nothing mails itself — see below. |
+| `Adzuna` (`ADZUNA_APP_ID`/`KEY`), `Jooble` | Those two scrapers return real results on the next scheduled run instead of being skipped as unconfigured. |
+| `Reddit` (`REDDIT_CLIENT_ID`/`SECRET`) | Reddit job-postings scraping starts contributing leads on the next run (uses `praw`). |
+| `Telegram` (`TELEGRAM_API_ID`/`HASH`) | Needs the `telethon` package added to `requirements.txt`; it is not installed in the worker image today, so enabling this source is a code change plus keys. Not in the daily default rotation. |
+| `Twitter` | **Cannot work.** The scraper uses `snscrape`, which is not installed and has been non-functional since X closed unauthenticated reading in 2023. Opt-in only, so it costs nothing, but pasting a key here does nothing. Consider removing the field. |
+| `ContactOut` | **Nothing yet.** ContactOut publishes no public REST API — its documented host answers 404 with an HTML page and the alternate hostname does not resolve. If you are issued a real endpoint, set `CONTACTOUT_API_URL` and it will be used. |
+| `WhatsApp session` | **Nothing yet.** Requires a whatsapp-web.js microservice that is not part of this stack; until it exists, WhatsApp actions return "blocked / whatsapp_not_configured" rather than pretending to send. |
+
+**Sending is never automatic, by design.** No credential turns on auto-send; a human
+clicks Send or bulk Send. This keeps a bad key or a scoring mistake from mailing
+hundreds of recruiters unattended.
+
+Verification nuance: an SMTP failure caused by *our* egress or sender reputation
+(Google's `5.2.1` reply to datacenter IPs) records `unknown`, not `invalid`, so a
+deliverable address is never silently discarded. Only an explicit recipient rejection
+(`5.1.1`, "user unknown", "no such user") marks an email invalid.
+
+---
+
 ## Daily Operations
 
 ```bash
