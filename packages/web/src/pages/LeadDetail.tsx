@@ -9,12 +9,14 @@ import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Modal } from '@/components/ui/modal';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { PageLoader } from '@/components/ui/spinner';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useAuthStore } from '@/stores/auth';
 import { useToast } from '@/components/ui/toast';
+import { useSSE, shouldRefreshLeadDetail } from '@/hooks/useSSE';
 import {
   ArrowLeft,
   Sparkles,
@@ -90,12 +92,38 @@ const LeadDetail: React.FC = () => {
     enabled: !!id,
   });
 
-  const { data: usersData } = useQuery('users-list', () => admin.getUsers(), { enabled: !!id });
+  const { data: usersData } = useQuery('users-list', () => admin.getUsers(), {
+    // /admin/users is admin-only; don't fire it as sales_rep (was a 403 + console error).
+    enabled: !!id && useAuthStore.getState().user?.role === 'admin',
+    retry: false,
+  });
+
+  const { data: providerStatus } = useQuery(
+    'provider-status',
+    () => admin.providerStatus(),
+    { enabled: !!id, staleTime: 60000, retry: false },
+  );
+  const enrichmentReady = providerStatus?.enrichment as Record<string, boolean> | undefined;
+  const sendingReady = providerStatus?.sending;
+
+  // Backend -> frontend: live updates for this lead (enrich/verify/draft/send
+  // completing elsewhere refresh the detail, timeline and score in place).
+  // Scoped to THIS lead's lifecycle events only — heartbeats, connects and
+  // other leads' events must not refetch (was a refetch storm).
+  useSSE('/sse/token', (event) => {
+    if (shouldRefreshLeadDetail(event, id)) {
+      queryClient.invalidateQueries(['lead', id]);
+      queryClient.invalidateQueries(['lead-timeline', id]);
+      queryClient.invalidateQueries(['lead-score', id]);
+    }
+  });
 
   const [editing, setEditing] = useState<EditingState>(null);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractProvider, setExtractProvider] = useState<'contactout' | 'snovio' | 'osint' | undefined>(undefined);
+  const [pendingSend, setPendingSend] = useState<{ channel: string; draftId?: string } | null>(null);
+  const [sending, setSending] = useState(false);
 
   const editDraftMutation = useMutation(
     ({ leadId, draftId, patch }: { leadId: string; draftId: string; patch: { subject?: string; body?: string } }) =>
@@ -174,14 +202,43 @@ const LeadDetail: React.FC = () => {
   const users = (usersData as any)?.users || [];
 
   const startEditing = (draft: OutreachDraft) => {
-    setEditing({ draftId: draft.id, subject: draft.subject || '', body: draft.body || '' });
+    // Restore an unsent local backup first (reload-proof editing).
+    let backup = null;
+    try {
+      const raw = localStorage.getItem(`draft-backup:${lead.id}:${draft.id}`);
+      backup = raw ? JSON.parse(raw) : null;
+    } catch { /* corrupted backup: fall through to server draft */ }
+    setEditing({
+      draftId: draft.id,
+      subject: backup?.subject ?? draft.subject ?? '',
+      body: backup?.body ?? draft.body ?? '',
+    });
+  };
+
+  const updateEditing = (patch: Partial<{ subject: string; body: string }>) => {
+    setEditing((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem(`draft-backup:${lead.id}:${prev.draftId}`, JSON.stringify({
+          subject: next.subject, body: next.body, savedAt: Date.now(),
+        }));
+      } catch { /* storage full/blocked: editing still works in memory */ }
+      return next;
+    });
+  };
+
+  const clearBackup = (draftId: string) => {
+    try {
+      localStorage.removeItem(`draft-backup:${lead.id}:${draftId}`);
+    } catch { /* ignore */ }
   };
 
   const saveEditing = () => {
     if (!editing) return;
     editDraftMutation.mutate(
       { leadId: lead.id, draftId: editing.draftId, patch: { subject: editing.subject, body: editing.body } },
-      { onSuccess: () => setEditing(null) },
+      { onSuccess: () => { clearBackup(editing.draftId); setEditing(null); } },
     );
   };
 
@@ -202,11 +259,35 @@ const LeadDetail: React.FC = () => {
     doNotContactMutation.mutate({ leadId: lead.id, value });
   };
 
+  const confirmSend = () => {
+    if (!pendingSend) return;
+    setSending(true);
+    leadsApi.send(lead.id, pendingSend.channel as any, pendingSend.draftId)
+      .then(() => {
+        queryClient.invalidateQueries(['lead', id]);
+        queryClient.invalidateQueries(['lead-timeline', id]);
+        toast({ title: 'Send queued — provider result will update the timeline', variant: 'success' });
+        setPendingSend(null);
+      })
+      .catch((err: Error) => toast({ title: 'Send blocked', description: err.message, variant: 'error' }))
+      .finally(() => setSending(false));
+  };
+
+  const sendBlockReason = lead.do_not_contact
+    ? 'This lead is flagged Do Not Contact — sending is blocked.'
+    : null;
+
   const handleAssign = (userId: string) => {
     assignMutation.mutate({ leadId: lead.id, userId: userId || null });
   };
 
   const assignedUser = users.find((u: any) => u.id === lead.assigned_to);
+  const currentUserId = useAuthStore.getState().user?.id;
+  const isAdmin = useAuthStore.getState().user?.role === 'admin';
+  const assignedLabel = assignedUser?.email
+    || (lead.assigned_to === currentUserId ? 'You' : null)
+    || (isAdmin ? lead.assigned_to : null)
+    || 'Unassigned';
   const bandMeta = SCORE_BAND_META[lead.score_band];
   const stageMetaV = stageMeta(lead.pipeline_stage);
   const emailMeta = emailStatusMeta(lead.email_status);
@@ -215,12 +296,12 @@ const LeadDetail: React.FC = () => {
 
   const providerNote =
     extractProvider === 'contactout'
-      ? 'ContactOut uses LinkedIn URL to find email/phone. Highest accuracy for this use case.'
+      ? `ContactOut uses LinkedIn URL to find email/phone. Highest accuracy. Per-row manual trigger — 1 credit only when YOU click Enrich, never bulk, never automatic.${enrichmentReady?.contactout === false ? ' Key missing.' : ''}`
       : extractProvider === 'snovio'
-        ? 'Snov.io uses company name + HR name to find email/phone. Good fallback.'
+        ? `Snov.io uses company name + HR name to find email/phone. Good fallback. Per-row manual trigger — credits only on your click.${enrichmentReady?.snovio === false ? ' Key missing.' : ''}`
         : extractProvider === 'osint'
-          ? 'OSINT fallback searches public sources for contact info. Lowest confidence.'
-          : null;
+          ? 'OSINT fallback searches public sources for contact info. Lowest confidence. Free — no credits.'
+          : 'Auto: ContactOut → Snov.io → OSINT. Paid providers run per-row on your click only — no credits consumed until you click Enrich.';
 
   return (
     <div className="space-y-phi4">
@@ -276,17 +357,20 @@ const LeadDetail: React.FC = () => {
                   Draft
                 </Button>
                 <Button
-                  onClick={() => runAction(leadsApi.send(lead.id, 'both'), 'Message sent')}
-                  disabled={lead.pipeline_stage !== 'drafted' && lead.pipeline_stage !== 'verified'}
+                  onClick={() => setPendingSend({ channel: 'both' })}
+                  disabled={(lead.pipeline_stage !== 'drafted' && lead.pipeline_stage !== 'verified') || !!sendBlockReason}
+                  title={sendBlockReason || 'Verify + preview before sending'}
                   variant="default"
                 >
                   <Send className="h-4 w-4" />
                   Send
                 </Button>
-                <Button onClick={() => setShowAssignModal(true)} variant="ghost">
-                  <UserPlus className="h-4 w-4" />
-                  Assign
-                </Button>
+                {isAdmin && (
+                  <Button onClick={() => setShowAssignModal(true)} variant="ghost">
+                    <UserPlus className="h-4 w-4" />
+                    Assign
+                  </Button>
+                )}
               </div>
             </div>
           </div>
@@ -304,7 +388,7 @@ const LeadDetail: React.FC = () => {
             )}
             <span className="inline-flex items-center gap-1.5">
               <User className="h-3.5 w-3.5" />
-              {assignedUser?.email || (lead.assigned_to ? lead.assigned_to : 'Unassigned')}
+              {assignedLabel}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-success" />
@@ -324,25 +408,42 @@ const LeadDetail: React.FC = () => {
         <CardContent>
           <div className="flex flex-wrap gap-2">
             {[
-              { value: undefined, label: 'Auto (ContactOut → Snov.io → OSINT)' },
-              { value: 'contactout', label: 'ContactOut' },
-              { value: 'snovio', label: 'Snov.io' },
-              { value: 'osint', label: 'OSINT Fallback' },
-            ].map((opt) => (
-              <button
-                key={opt.label}
-                onClick={() => setExtractProvider(opt.value as never)}
-                className={`rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition-colors ${
-                  extractProvider === opt.value
-                    ? 'border-primary bg-primary-soft text-primary'
-                    : 'border-border bg-background text-muted-foreground hover:border-foreground/20 hover:text-foreground'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
+              { value: undefined, label: 'Auto (ContactOut → Snov.io → OSINT)', key: undefined },
+              { value: 'contactout', label: 'ContactOut', key: 'contactout' },
+              { value: 'snovio', label: 'Snov.io', key: 'snovio' },
+              { value: 'osint', label: 'OSINT Fallback', key: 'osint' },
+            ].map((opt) => {
+              // Paid providers show live configured/NOT-CONFIGURED state;
+              // OSINT/Auto need no key. Keys are never exposed — booleans only.
+              const needsKey = opt.key === 'contactout' || opt.key === 'snovio';
+              const ready = !needsKey || (opt.key && enrichmentReady?.[opt.key]);
+              return (
+                <button
+                  key={opt.label}
+                  onClick={() => setExtractProvider(opt.value as never)}
+                  title={needsKey && !ready ? `${opt.label} API key not configured — runs but cannot spend credits` : `${opt.label} — per-row, on-demand only`}
+                  className={`rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition-colors ${
+                    extractProvider === opt.value
+                      ? 'border-primary bg-primary-soft text-primary'
+                      : 'border-border bg-background text-muted-foreground hover:border-foreground/20 hover:text-foreground'
+                  }`}
+                >
+                  {opt.label}
+                  {needsKey && (
+                    <span className={`ml-1.5 text-[11px] font-semibold ${ready ? 'text-success' : 'text-warning'}`}>
+                      {ready ? '●' : '○'}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
           {providerNote && <p className="mt-3 text-[13px] text-muted-foreground">{providerNote}</p>}
+          {extractProvider && (extractProvider === 'contactout' || extractProvider === 'snovio') && enrichmentReady?.[extractProvider] === false && (
+            <p className="mt-2 text-[13px] font-medium text-warning">
+              ACTION REQUIRED: no {extractProvider === 'contactout' ? 'ContactOut' : 'Snov.io'} key configured — enriching with it will fail honestly. Add a key in Settings or use Auto/OSINT.
+            </p>
+          )}
           {extracting && (
             <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary-soft px-4 py-3 text-[13px] text-primary animate-fade-in">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -497,7 +598,7 @@ const LeadDetail: React.FC = () => {
                         <label className="mb-1 block text-[13px] font-medium text-foreground">Subject</label>
                         <Input
                           value={editing.subject}
-                          onChange={(e) => setEditing({ ...editing, subject: e.target.value })}
+                          onChange={(e) => updateEditing({ subject: e.target.value })}
                           placeholder="Email subject"
                         />
                       </div>
@@ -505,7 +606,7 @@ const LeadDetail: React.FC = () => {
                         <label className="mb-1 block text-[13px] font-medium text-foreground">Body</label>
                         <Textarea
                           value={editing.body}
-                          onChange={(e) => setEditing({ ...editing, body: e.target.value })}
+                          onChange={(e) => updateEditing({ body: e.target.value })}
                           rows={8}
                           placeholder="Message body"
                         />
@@ -514,7 +615,7 @@ const LeadDetail: React.FC = () => {
                         <Button onClick={saveEditing} loading={editDraftMutation.isLoading}>
                           {editDraftMutation.isLoading ? 'Saving…' : 'Save Draft'}
                         </Button>
-                        <Button onClick={() => setEditing(null)} variant="outline" disabled={editDraftMutation.isLoading}>
+                        <Button onClick={() => { clearBackup(draft.id); setEditing(null); }} variant="outline" disabled={editDraftMutation.isLoading}>
                           Cancel
                         </Button>
                       </div>
@@ -530,10 +631,11 @@ const LeadDetail: React.FC = () => {
                           Edit Draft
                         </Button>
                         <Button
-                          onClick={() => runAction(leadsApi.send(lead.id, draft.channel, draft.id), 'Message sent')}
+                          onClick={() => setPendingSend({ channel: draft.channel, draftId: draft.id })}
                           variant="soft"
                           size="sm"
-                          disabled={lead.do_not_contact}
+                          disabled={!!sendBlockReason}
+                          title={sendBlockReason || `Send via ${draft.channel} — you will confirm first`}
                         >
                           <Send className="h-3.5 w-3.5" />
                           Send this draft
@@ -578,9 +680,11 @@ const LeadDetail: React.FC = () => {
                         {event.timestamp ? formatDateTime(event.timestamp) : '—'}
                       </span>
                     </div>
-                    {(event.status || event.provider) && (
+                    {(event.status || event.delivery_status || event.provider || event.channel) && (
                       <p className="mt-0.5 flex flex-wrap gap-2 text-xs text-muted-foreground">
                         {event.status && <span className="capitalize">{event.status}</span>}
+                        {event.delivery_status && <span className="capitalize">delivery: {event.delivery_status}</span>}
+                        {event.channel && <span className="capitalize">via {event.channel}</span>}
                         {event.provider && <span className="capitalize">via {event.provider}</span>}
                       </p>
                     )}
@@ -591,6 +695,19 @@ const LeadDetail: React.FC = () => {
           )}
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={!!pendingSend}
+        onClose={() => (sending ? null : setPendingSend(null))}
+        onConfirm={confirmSend}
+        title={sendBlockReason ? 'Sending blocked' : `Send via ${pendingSend?.channel}?`}
+        description={
+          sendBlockReason ||
+          `To: ${lead.hr_email || lead.hr_mobile || 'no verified contact'}\nEmail: ${lead.email_status || 'unknown'} · WhatsApp: ${lead.whatsapp_status || 'unknown'}\nEmail provider: ${sendingReady?.email ? 'configured' : 'NOT CONFIGURED — send will fail honestly, configure keys in Settings'}\nWhatsApp provider: ${sendingReady?.whatsapp ? 'configured' : 'NOT CONFIGURED — send will fail honestly, configure in Settings'}\nQueued sends report the real provider result — "queued" is not "sent".`
+        }
+        confirmLabel={sendBlockReason ? 'Blocked' : 'Confirm send'}
+        loading={sending}
+      />
 
       <Modal open={showAssignModal} onClose={() => setShowAssignModal(false)} title="Assign Lead">
         <div className="space-y-2">

@@ -106,10 +106,10 @@ function Footer({ collapsed, email, role, onLogout, onCommand }: { collapsed: bo
 const Sidebar = ({ drawerOpen = false, onDrawerClose }: { drawerOpen?: boolean; onDrawerClose?: () => void }) => {
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(LS_KEY) === "1"; } catch { return false; } });
   useEffect(() => { try { localStorage.setItem(LS_KEY, collapsed ? "1" : "0"); } catch { /* noop */ } }, [collapsed]);
-  const { user, logout } = useAuthStore();
+  const { user, logout, revokeCurrentToken } = useAuthStore();
   const navigate = useNavigate();
   const isAdmin = user?.role === "admin";
-  const onLogout = async () => { await logout(); navigate("/login"); };
+  const onLogout = async () => { await revokeCurrentToken(); await logout(); navigate("/login"); };
   const openPalette = () => window.dispatchEvent(new Event("hiregen:open-palette"));
 
   const Header = ({ compact }: { compact: boolean }) => (

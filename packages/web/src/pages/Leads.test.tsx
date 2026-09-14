@@ -37,6 +37,7 @@ jest.mock('@/lib/api', () => ({
     getRuns: jest.fn(),
     getUsers: jest.fn(),
     sourceHealth: jest.fn(),
+    armyStatus: jest.fn(),
   },
   dashboard: {
     stats: jest.fn(),

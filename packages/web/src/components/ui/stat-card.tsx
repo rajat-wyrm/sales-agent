@@ -79,19 +79,19 @@ export function StatCard({
         <Icon className="h-[21px] w-[21px]" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="text-[13px] font-medium text-muted-foreground">{label}</p>
+        <p className="text-[13px] font-medium leading-tight text-muted-foreground">{label}</p>
         <div className="mt-0.5 flex items-baseline gap-1.5">
           {loading ? (
             <div className="skeleton h-7 w-16" />
           ) : (
-            <>
-              <span className="text-gradient text-2xl font-semibold tracking-tight tabular-nums">
-                {isNum ? counted.toLocaleString() : value ?? "—"}
-              </span>
-              {suffix && <span className="text-sm text-muted-foreground">{suffix}</span>}
-            </>
+            <span className="text-gradient text-2xl font-semibold tracking-tight tabular-nums">
+              {isNum ? counted.toLocaleString() : value ?? "—"}
+            </span>
           )}
         </div>
+        {suffix && !loading && (
+          <p className="mt-0.5 truncate text-xs font-medium tabular-nums text-success">{suffix}</p>
+        )}
         {hint && <p className="mt-1 truncate text-xs text-muted-foreground">{hint}</p>}
       </div>
     </motion.div>

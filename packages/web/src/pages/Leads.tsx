@@ -14,7 +14,7 @@ import {
   BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle, MoreVertical,
   Columns3, LayoutGrid, Download, Zap, ExternalLink, Phone, Copy, Check, Radar,
 } from 'lucide-react';
-import { useSSE } from '@/hooks/useSSE';
+import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import { useAuthStore } from '@/stores/auth';
 import { useToast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
@@ -81,8 +81,7 @@ const Leads: React.FC = () => {
   );
 
   useSSE('/sse/token', (event) => {
-    const base = String(event.type || '').replace(/d$/, '');
-    if (['lead_updated', 'lead_score_updated', 'pipeline_stage_changed', 'enrichment_complet', 'verification_complet', 'draft_generated', 'send_complet', 'verify_send_complet'].includes(base)) {
+    if (isLeadLifecycleEvent(event.type)) {
       refetch();
     }
   });
@@ -211,6 +210,8 @@ const Leads: React.FC = () => {
       {/* toolbar */}
       <div className="card flex flex-wrap items-center gap-2 p-3">
         <Select value={experienceFilter} onChange={(e) => setExperienceFilter(e.target.value as never)} className="w-40" aria-label="Experience"><option value="">All experience</option><option value="fresher">Fresher</option><option value="0-1yr">0-1 years</option><option value="0-2yr">0-2 years</option><option value="no-experience">No experience</option></Select>
+        <Select value={scoreBand || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'score_band'), ...(e.target.value ? [{ id: 'score_band', value: e.target.value }] : [])])} className="w-32" aria-label="Score"><option value="">All scores</option><option value="hot">Hot ≥70</option><option value="warm">Warm 40+</option><option value="cold">Cold</option></Select>
+        <Select value={pipelineStage || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'pipeline_stage'), ...(e.target.value ? [{ id: 'pipeline_stage', value: e.target.value }] : [])])} className="w-40" aria-label="Stage"><option value="">All stages</option><option value="discovered">New</option><option value="enriched">Enriched</option><option value="verified">Verified</option><option value="drafted">Ready to send</option><option value="contacted">Sent</option><option value="replied">Replied</option><option value="bounced">Failed</option><option value="contact_unavailable">Needs enrichment</option><option value="verification_failed">Verify failed</option><option value="send_failed">Send failed</option><option value="suppressed">Suppressed</option></Select>
         <div className="h-6 w-px bg-border" />
         <Menu align="start" ariaLabel="Columns" trigger={<Button variant="outline" size="sm"><Columns3 className="h-4 w-4" />Columns</Button>} items={ALL_COLUMNS.map((c) => ({ label: c.label, checked: visibility[c.id] !== false, onSelect: () => setVisibility((v) => ({ ...v, [c.id]: v[c.id] === false })) }))} />
         <Menu align="start" ariaLabel="Density" trigger={<Button variant="outline" size="sm"><LayoutGrid className="h-4 w-4" />{density}</Button>} items={[{ label: 'Comfortable', checked: density === 'comfortable', onSelect: () => setDensity('comfortable') }, { label: 'Compact', checked: density === 'compact', onSelect: () => setDensity('compact') }]} />
@@ -229,9 +230,9 @@ const Leads: React.FC = () => {
               <Users className="h-4 w-4 text-primary" /><span className="text-sm font-medium">{selectedIds.size} selected</span>
               <div className="h-5 w-px bg-border" />
               <span className="text-xs text-muted-foreground">Enrich via:</span>
-              {ENRICH_PROVIDERS.map((p) => <Button key={p.key} variant="secondary" size="sm" onClick={() => bulkEnrichMutation.mutate({ ids: Array.from(selectedIds), provider: p.key })}><Sparkles className="h-3.5 w-3.5" />{p.label.replace(' (auto)', '')}</Button>)}
+              {ENRICH_PROVIDERS.map((p) => <Button key={p.key} variant="secondary" size="sm" onClick={() => { if (window.confirm(`Enrich ${selectedIds.size} leads via ${p.label}? Credits are consumed per lead (on-demand).`)) bulkEnrichMutation.mutate({ ids: Array.from(selectedIds), provider: p.key }); }}><Sparkles className="h-3.5 w-3.5" />{p.label.replace(' (auto)', '')}</Button>)}
               <Select value={draftChannel} onChange={(e) => setDraftChannel(e.target.value as any)} className="h-8 w-32" aria-label="Channel"><option value="both">Both</option><option value="email">Email</option><option value="whatsapp">WhatsApp</option></Select>
-              <Button size="sm" onClick={() => bulkDraftMutation.mutate({ leadIds: Array.from(selectedIds), channel: draftChannel })} loading={bulkDraftMutation.isLoading}><Play className="h-3.5 w-3.5" />Draft</Button>
+              <Button size="sm" onClick={() => { if (window.confirm(`Generate drafts for ${selectedIds.size} leads?`)) bulkDraftMutation.mutate({ leadIds: Array.from(selectedIds), channel: draftChannel }); }} loading={bulkDraftMutation.isLoading}><Play className="h-3.5 w-3.5" />Draft</Button>
               <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelectedIds(new Set())}>Clear</Button>
             </div>
           </motion.div>

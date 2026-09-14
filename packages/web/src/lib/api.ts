@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { LoginResponse } from './types';
+import { API_URL } from '@/lib/env';
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3000/api',
+  baseURL: API_URL,
   timeout: 30000,
 });
 
@@ -18,12 +19,21 @@ const addRefreshSubscriber = (cb: (token: string) => void) => {
   refreshSubscribers.push(cb);
 };
 
+// Auth endpoints must never go through the refresh path. A 401 from /auth/refresh
+// that re-enters this interceptor would queue itself behind the very lock it is
+// holding, so the leader's `finally` never runs and every request stalls forever.
+const AUTH_FREE_URLS = ['/auth/login', '/auth/register', '/auth/refresh', '/auth/logout'];
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (
+      error.response?.status === 401 &&
+      !originalRequest._retry &&
+      !AUTH_FREE_URLS.some((u) => (originalRequest.url || '').startsWith(u))
+    ) {
       originalRequest._retry = true;
 
       if (isRefreshing) {
@@ -57,6 +67,8 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshError) {
         const { useAuthStore } = await import('@/stores/auth');
+        // Drop credentials first so nothing in flight can replay the dead token,
+        // then hand off to the login route.
         useAuthStore.getState().logout();
         window.location.href = '/login';
         return Promise.reject(refreshError);
@@ -301,6 +313,14 @@ export const admin = {
   sourceHealth: async () => {
     const res = await api.get('/sources/health');
     return res.data;
+  },
+  providerStatus: async () => {
+    const res = await api.get('/providers/status');
+    return res.data as {
+      enrichment: Record<string, boolean>;
+      sending: { email: boolean; whatsapp: boolean };
+      ai: { gemini: boolean };
+    };
   },
   bulkDraftEnrich: async (leadIds: string[], channel: 'email' | 'whatsapp' | 'both' = 'both') => {
     const res = await api.post('/leads/bulk-draft', { lead_ids: leadIds, channel });

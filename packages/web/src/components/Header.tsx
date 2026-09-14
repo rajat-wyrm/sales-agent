@@ -35,7 +35,7 @@ interface Run {
 }
 
 const Header = ({ onMenuClick }: { onMenuClick?: () => void }) => {
-  const { user, logout } = useAuthStore();
+  const { user, logout, revokeCurrentToken } = useAuthStore();
   const navigate = useNavigate();
   const location = useLocation();
   const title = usePageTitle(location.pathname);
@@ -75,6 +75,7 @@ const Header = ({ onMenuClick }: { onMenuClick?: () => void }) => {
   }, []);
 
   const handleLogout = async () => {
+    await revokeCurrentToken();
     await logout();
     navigate("/login");
   };

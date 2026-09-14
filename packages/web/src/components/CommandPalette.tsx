@@ -25,7 +25,7 @@ export function CommandPalette() {
   const [q, setQ] = useState('');
   const [active, setActive] = useState(0);
   const navigate = useNavigate();
-  const { user, logout } = useAuthStore();
+  const { user, logout, revokeCurrentToken } = useAuthStore();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -64,7 +64,7 @@ export function CommandPalette() {
         admin.runArmy().then(() => toast({ title: 'Army deployed', description: 'Scraping all sources and enriching.', variant: 'success' })).catch((e) => toast({ title: 'Failed', description: (e as Error).message, variant: 'error' }));
         setOpen(false);
       } },
-      { id: 'logout', label: 'Sign out', icon: <LogOut />, group: 'Account', run: () => { logout().then(() => go('/login')); } },
+      { id: 'logout', label: 'Sign out', icon: <LogOut />, group: 'Account', run: () => { revokeCurrentToken().then(() => logout()).then(() => go('/login')); } },
     ];
     return [...nav, ...actions];
   }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps

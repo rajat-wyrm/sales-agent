@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { leads as leadsApi } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { PageHeader } from '@/components/ui/page-header';
 import { PageLoader } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -56,8 +57,15 @@ const Duplicates: React.FC = () => {
   );
 
   const handleMerge = (leadId: string, mergeIntoId: string) => {
-    mergeMutation.mutate({ leadId, mergeIntoId });
+    setPendingMerge({ leadId, mergeIntoId });
   };
+
+  const confirmMerge = () => {
+    if (!pendingMerge || mergeMutation.isLoading) return;
+    mergeMutation.mutate(pendingMerge, { onSuccess: () => setPendingMerge(null) });
+  };
+
+  const [pendingMerge, setPendingMerge] = useState<{ leadId: string; mergeIntoId: string } | null>(null);
 
   if (isLoading) return <PageLoader label="Loading duplicates..." />;
 
@@ -70,6 +78,15 @@ const Duplicates: React.FC = () => {
 
   return (
     <div className="space-y-phi4">
+      <ConfirmDialog
+        open={!!pendingMerge}
+        onClose={() => (mergeMutation.isLoading ? null : setPendingMerge(null))}
+        onConfirm={confirmMerge}
+        title="Merge these leads?"
+        description="Outreach history, drafts and verification logs move to the surviving lead. The merged lead is deleted. This cannot be undone."
+        confirmLabel="Merge leads"
+        loading={mergeMutation.isLoading}
+      />
       <PageHeader
         title="Duplicate Leads"
         description="Review and resolve potential duplicate leads in your pipeline"

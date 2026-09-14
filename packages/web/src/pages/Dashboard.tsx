@@ -6,7 +6,7 @@ import {
   Cell, PieChart, Pie, BarChart, Bar,
 } from 'recharts';
 import { dashboard, admin, CreditUsageResponse, RunLog } from '@/lib/api';
-import { useSSE } from '@/hooks/useSSE';
+import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import { useAuthStore } from '@/stores/auth';
 import {
   Users, Flame, Sun, Snowflake, ShieldAlert, Zap, Activity, BarChart3,
@@ -23,12 +23,22 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { formatDateTime } from '@/lib/format';
 
 const STAGE_LABELS: Record<string, string> = {
-  discovered: 'Discovered', enriched: 'Enriched', verified: 'Verified',
-  drafted: 'Drafted', contacted: 'Contacted', replied: 'Replied', bounced: 'Bounced',
+  discovered: 'Discovered', enriching: 'Enriching', enriched: 'Enriched',
+  verifying: 'Verifying', verified: 'Verified', ready_for_outreach: 'Ready',
+  message_generated: 'Messaged', drafted: 'Drafted', send_pending: 'Sending',
+  contacted: 'Contacted', sent: 'Sent', delivered: 'Delivered', replied: 'Replied',
+  converted: 'Converted', bounced: 'Bounced', contact_unavailable: 'No contact',
+  suppressed: 'Suppressed', send_failed: 'Send failed', provider_error: 'Provider error',
+  retry_pending: 'Retrying', enrichment_failed: 'Enrich failed', verification_failed: 'Verify failed',
 };
 const STAGE_COLORS: Record<string, string> = {
-  discovered: '#816cff', enriched: '#22d3ee', verified: '#34d399',
-  drafted: '#fbbf24', contacted: '#fb6a8f', replied: '#38bdf8', bounced: '#f87171',
+  discovered: '#816cff', enriching: '#a78bfa', enriched: '#22d3ee',
+  verifying: '#2dd4bf', verified: '#34d399', ready_for_outreach: '#4ade80',
+  message_generated: '#a3e635', drafted: '#fbbf24', send_pending: '#fb923c',
+  contacted: '#fb6a8f', sent: '#f472b6', delivered: '#38bdf8', replied: '#38bdf8',
+  converted: '#34d399', bounced: '#f87171', contact_unavailable: '#94a3b8',
+  suppressed: '#64748b', send_failed: '#ef4444', provider_error: '#f97316',
+  retry_pending: '#eab308', enrichment_failed: '#f87171', verification_failed: '#f87171',
 };
 
 // One glass tooltip reused by every chart.
@@ -64,7 +74,10 @@ const Dashboard: React.FC = () => {
   });
 
   useSSE('/sse/token', (event) => {
-    if (['stats_updated', 'lead_score_updated', 'pipeline_stage_changed'].includes(event.type)) refetch();
+    if (isLeadLifecycleEvent(event.type)) {
+      refetch();
+      queryClient.invalidateQueries('dashboard-credits');
+    }
   });
 
   if (isLoading) return <PageLoader label="Loading dashboard…" />;
@@ -94,6 +107,25 @@ const Dashboard: React.FC = () => {
   const q = armyStatus || { raw: 0, enrichment: 0, verification: 0, draft: 0 };
   const queued = (q.raw || 0) + (q.enrichment || 0) + (q.verification || 0) + (q.draft || 0);
   const armyLive = queued > 0;
+
+  const new24h = totals.new_24h || 0;
+  const trend = ((data as any)?.trend_14d || []) as Array<{ day: string; discovered: string }>;
+  const trendData = trend.map((d) => ({
+    day: d.day.slice(5).replace('-', '/'),
+    discovered: Number(d.discovered),
+  }));
+  const verif7d = ((data as any)?.verification_7d || []) as Array<{ channel: string; result: string; count: string }>;
+  const verifData = verif7d.map((d) => ({
+    name: `${d.channel} · ${d.result}`,
+    value: Number(d.count),
+  }));
+  const outreach7d = ((data as any)?.outreach_7d || []) as Array<{ channel: string; delivery_status: string; count: string }>;
+  const outreachData = outreach7d.map((d) => ({
+    name: `${d.channel} · ${d.delivery_status}`,
+    value: Number(d.count),
+  }));
+  const VERIF_COLORS = ['#34d399', '#fbbf24', '#f87171', '#38bdf8', '#a78bfa', '#94a3b8'];
+  const OUTREACH_COLORS = ['#fb6a8f', '#38bdf8', '#34d399', '#f87171', '#fbbf24', '#94a3b8'];
 
   return (
     <div className="space-y-phi4">
@@ -130,12 +162,40 @@ const Dashboard: React.FC = () => {
 
       {/* ---- stats ---- */}
       <StatCardGrid>
-        <StatCard icon={Users} label="Total Leads" value={totals.total_leads} tone="primary" />
+        <StatCard icon={Users} label="Total Leads" value={totals.total_leads} tone="primary" suffix={new24h > 0 ? `+${new24h} today` : undefined} />
         <StatCard icon={Flame} label="Hot Leads" value={totals.hot} tone="danger" />
         <StatCard icon={Sun} label="Warm Leads" value={totals.warm} tone="warning" />
         <StatCard icon={Snowflake} label="Cold Leads" value={totals.cold} tone="info" />
         <StatCard icon={ShieldAlert} label="Do Not Contact" value={totals.do_not_contact || 0} tone="muted" />
       </StatCardGrid>
+
+      {/* ---- discovery trend ---- */}
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Activity className="h-5 w-5 text-primary" />Discovery Trend · 14 days</CardTitle></CardHeader>
+        <CardContent>
+          {trendData.length === 0 ? (
+            <EmptyState icon={BarChart3} title="No discovery data yet" description="New leads per day will chart here once the army runs." />
+          ) : (
+            <div className="h-[190px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={trendData} margin={{ left: -12, right: 12, top: 4 }}>
+                  <defs>
+                    <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#816cff" stopOpacity={0.45} />
+                      <stop offset="100%" stopColor="#816cff" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                  <XAxis dataKey="day" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                  <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} width={36} />
+                  <Tooltip content={<ChartTip />} cursor={{ stroke: 'hsl(var(--primary))', strokeOpacity: 0.4 }} />
+                  <Area type="monotone" dataKey="discovered" name="Discovered" stroke="#816cff" strokeWidth={2.5} fill="url(#trendGrad)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* ---- live pipeline ---- */}
       <div className="grid grid-cols-1 gap-phi3 xl:grid-cols-3">
@@ -229,8 +289,7 @@ const Dashboard: React.FC = () => {
       {/* ---- bands + source health + credits ---- */}
       <div className="grid grid-cols-1 gap-phi3 lg:grid-cols-3">
         <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><Flame className="h-5 w-5 text-hot" />Lead Quality</CardTitle></CardHeader>
-          <CardContent>
+          <CardHeader><CardTitle className="flex items-center gap-2"><Flame className="h-5 w-5 text-hot" />Lead Quality</CardTitle></CardHeader>          <CardContent>
             {bandData.length === 0 ? <EmptyState icon={BarChart3} title="No leads scored yet" description="Scores appear once leads are enriched." /> : (
               <div className="flex items-center gap-4">
                 <div className="h-32 w-32 shrink-0">
@@ -279,6 +338,63 @@ const Dashboard: React.FC = () => {
             </CardContent>
           </Card>
         )}
+      </div>
+
+      {/* ---- verification + outreach outcomes (7d, live) ---- */}
+      <div className="grid grid-cols-1 gap-phi3 lg:grid-cols-2">
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-success" />Verification Outcomes · 7d</CardTitle></CardHeader>
+          <CardContent>
+            {verifData.length === 0 ? (
+              <EmptyState icon={CheckCircle2} title="No verifications yet" description="Email/WhatsApp results will break down here." />
+            ) : (
+              <div className="flex items-center gap-4">
+                <div className="h-32 w-32 shrink-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={verifData} dataKey="value" nameKey="name" innerRadius={34} outerRadius={58} paddingAngle={3} stroke="none">
+                        {verifData.map((d, i) => <Cell key={d.name} fill={VERIF_COLORS[i % VERIF_COLORS.length]} />)}
+                      </Pie>
+                      <Tooltip content={<ChartTip />} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="space-y-2 text-sm">
+                  {verifData.map((d, i) => (
+                    <div key={d.name} className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full" style={{ background: VERIF_COLORS[i % VERIF_COLORS.length] }} /><span className="text-muted-foreground capitalize">{d.name}</span><span className="font-medium tabular-nums">{d.value}</span></div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><MailCheck className="h-5 w-5 text-info" />Outreach Outcomes · 7d</CardTitle></CardHeader>
+          <CardContent>
+            {outreachData.length === 0 ? (
+              <EmptyState icon={MailCheck} title="No outreach yet" description="Send states will break down here once messages go out." />
+            ) : (
+              <div className="flex items-center gap-4">
+                <div className="h-32 w-32 shrink-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={outreachData} dataKey="value" nameKey="name" innerRadius={34} outerRadius={58} paddingAngle={3} stroke="none">
+                        {outreachData.map((d, i) => <Cell key={d.name} fill={OUTREACH_COLORS[i % OUTREACH_COLORS.length]} />)}
+                      </Pie>
+                      <Tooltip content={<ChartTip />} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="space-y-2 text-sm">
+                  {outreachData.map((d, i) => (
+                    <div key={d.name} className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full" style={{ background: OUTREACH_COLORS[i % OUTREACH_COLORS.length] }} /><span className="text-muted-foreground capitalize">{d.name}</span><span className="font-medium tabular-nums">{d.value}</span></div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* ---- recent runs ---- */}

@@ -22,6 +22,12 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
       },
+      '/sse': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/sse/, '/api/sse'),
+      },
     },
   },
   build: {

@@ -26,24 +26,53 @@ import {
 } from 'lucide-react';
 
 const ALL_SOURCES = [
-  { name: 'remoteok', label: 'RemoteOK' },
-  { name: 'github_jobs', label: 'GitHub Jobs' },
-  { name: 'greenhouse', label: 'Greenhouse' },
-  { name: 'lever', label: 'Lever' },
   { name: 'naukri', label: 'Naukri.com' },
   { name: 'internshala', label: 'Internshala' },
-  { name: 'indeed', label: 'Indeed India' },
+  { name: 'freshersworld', label: 'Freshersworld' },
+  { name: 'apna', label: 'Apna' },
+  { name: 'workindia', label: 'WorkIndia' },
+  { name: 'shine', label: 'Shine.com' },
+  { name: 'timesjobs', label: 'TimesJobs' },
   { name: 'foundit', label: 'Foundit/Monster' },
   { name: 'instahyre', label: 'Instahyre' },
-  { name: 'wellfound', label: 'AngelList/Wellfound' },
-  { name: 'glassdoor', label: 'Glassdoor' },
-  { name: 'shine', label: 'Shine.com' },
   { name: 'cutshort', label: 'CutShort' },
-  { name: 'linkedin', label: 'LinkedIn Jobs' },
-  { name: 'freshersworld', label: 'Freshersworld' },
-  { name: 'arbeitnow', label: 'Arbeitnow' },
-  { name: 'usajobs', label: 'USAJobs' },
+  { name: 'unstop', label: 'Unstop' },
+  { name: 'iimjobs', label: 'iimjobs' },
+  { name: 'jobinsider', label: 'JobInsider' },
+  { name: 'hirist', label: 'Hirist' },
+  { name: 'classicjobs', label: 'Classic Jobs' },
+  { name: 'hackerearth', label: 'HackerEarth' },
+  { name: 'ambitionbox', label: 'AmbitionBox' },
+  { name: 'greenhouse', label: 'Greenhouse (ATS)' },
+  { name: 'lever', label: 'Lever (ATS)' },
+  { name: 'ashby', label: 'Ashby (ATS)' },
+  { name: 'workday', label: 'Workday (ATS)' },
+  { name: 'smartrecruiters', label: 'SmartRecruiters (ATS)' },
+  { name: 'recruitee', label: 'Recruitee (ATS)' },
+  { name: 'teamtailor', label: 'Teamtailor (ATS)' },
+  { name: 'breezy', label: 'Breezy (ATS)' },
+  { name: 'bamboohr', label: 'BambooHR (ATS)' },
+  { name: 'personio', label: 'Personio (ATS)' },
+  { name: 'indeed', label: 'Indeed India' },
   { name: 'duckduckgo', label: 'DuckDuckGo Search' },
+  { name: 'amazon', label: 'Amazon Jobs' },
+  { name: 'offcampus', label: 'Off-campus aggregators' },
+  { name: 'hasjob', label: 'Hasjob' },
+  { name: 'glassdoor', label: 'Glassdoor' },
+  { name: 'wellfound', label: 'AngelList/Wellfound' },
+  { name: 'linkedin', label: 'LinkedIn Jobs' },
+  { name: 'remoteok', label: 'RemoteOK' },
+  { name: 'github_jobs', label: 'GitHub Jobs' },
+  { name: 'arbeitnow', label: 'Arbeitnow' },
+  { name: 'adzuna', label: 'Adzuna' },
+  { name: 'jooble', label: 'Jooble' },
+  { name: 'usajobs', label: 'USAJobs' },
+  { name: 'reddit', label: 'Reddit Jobs' },
+  { name: 'twitter', label: 'Twitter Jobs' },
+  { name: 'telegram', label: 'Telegram Channels' },
+  { name: 'facebook', label: 'Facebook Groups' },
+  { name: 'whatsapp', label: 'WhatsApp Listener' },
+  { name: 'college_portals', label: 'College Portals' },
 ];
 
 const DEFAULT_SCORING_WEIGHTS = {
@@ -86,11 +115,26 @@ const Settings: React.FC = () => {
 
   const isAdmin = user?.role === 'admin';
 
-  const { data: keyData, isLoading, refetch } = useQuery('api-keys', () => admin.getApiKeys());
-  const { data: sourcesData } = useQuery('sources-enabled', () => admin.getSetting('sources_enabled'));
-  const { data: weightsData } = useQuery('scoring-weights', () => admin.getSetting('scoring_weights'));
-  const { data: cronData } = useQuery('cron-schedule', () => admin.getSetting('cron_schedule'));
-  const { data: healthData } = useQuery('source-health', () => admin.sourceHealth());
+  const { data: keyData, isLoading, refetch } = useQuery('api-keys', () => admin.getApiKeys(), {
+    enabled: isAdmin,
+    retry: false,
+  });
+  const { data: sourcesData } = useQuery('sources-enabled', () => admin.getSetting('sources_enabled'), {
+    enabled: isAdmin,
+    retry: false,
+  });
+  const { data: weightsData } = useQuery('scoring-weights', () => admin.getSetting('scoring_weights'), {
+    enabled: isAdmin,
+    retry: false,
+  });
+  const { data: cronData } = useQuery('cron-schedule', () => admin.getSetting('cron_schedule'), {
+    enabled: isAdmin,
+    retry: false,
+  });
+  const { data: healthData } = useQuery('source-health', () => admin.sourceHealth(), {
+    enabled: isAdmin,
+    retry: false,
+  });
 
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -172,9 +216,16 @@ const Settings: React.FC = () => {
     const formData = new FormData(form);
     const keys: Record<string, string> = {};
     ['contactout', 'snovio', 'gemini', 'whatsapp', 'resend', 'brevo'].forEach((key) => {
-      const val = formData.get(key) as string;
-      if (val && val.trim()) keys[key] = val.trim();
+      const val = (formData.get(key) as string) || '';
+      const trimmed = val.trim();
+      // NEVER submit masked placeholders back: the server returns keys masked
+      // (••••abcd) and saving one would overwrite the real key with the mask.
+      if (trimmed && !trimmed.startsWith('•')) keys[key] = trimmed;
     });
+    if (Object.keys(keys).length === 0) {
+      toast({ title: 'Nothing to save', description: 'Enter a new key value first — masked placeholders are never re-submitted.', variant: 'error' });
+      return;
+    }
     saveMutation.mutate(keys);
     setApiKeysDirty(false);
   };
@@ -289,6 +340,11 @@ const Settings: React.FC = () => {
               <div key={field.name}>
                 <label className="label" htmlFor={`key-${field.name}`}>
                   {field.label}
+                  {apiKeys[field.name] ? (
+                    <span className="ml-2 rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-semibold text-success">configured</span>
+                  ) : (
+                    <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">not set</span>
+                  )}
                 </label>
                 <Input
                   id={`key-${field.name}`}
@@ -411,12 +467,13 @@ const Settings: React.FC = () => {
         </CardHeader>
         <CardContent>
           <p className="mb-5 text-[13px] text-muted-foreground">
-            Set the daily scrape schedule (cron format). Default: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">0 2 * * *</code> (2 AM UTC)
+            The daily scrape runs on <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">DAILY_SCRAPE_HOUR</code> (env, default 03:00 UTC) plus n8n cron.
+            This field is informational — the schedule is operator-managed, not stored here.
           </p>
-          <form id="cron-form" className="flex flex-wrap items-end gap-4">
+          <form id="cron-form" className="flex flex-wrap items-end gap-4" onSubmit={(e) => e.preventDefault()}>
             <div className="min-w-[240px] flex-1">
               <label className="label" htmlFor="cron_schedule">
-                Cron Expression
+                Stored notes (informational only)
               </label>
               <Input
                 id="cron_schedule"
@@ -430,7 +487,7 @@ const Settings: React.FC = () => {
             </div>
             <Button onClick={handleSaveCron} loading={saveSettingsMutation.isLoading} disabled={!cronDirty}>
               <Save className="h-4 w-4" />
-              {saveSettingsMutation.isLoading ? 'Saving…' : 'Save Schedule'}
+              {saveSettingsMutation.isLoading ? 'Saving…' : 'Save Note'}
             </Button>
           </form>
         </CardContent>

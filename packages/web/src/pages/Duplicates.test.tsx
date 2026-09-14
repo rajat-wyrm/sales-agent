@@ -96,7 +96,7 @@ describe('Duplicates', () => {
     expect(screen.getByText('Retry')).toBeTruthy();
   });
 
-  it('calls mergeDuplicate when clicking merge button', async () => {
+  it('asks for confirmation before merging, then calls mergeDuplicate', async () => {
     mockedApi.leads.getDuplicates.mockResolvedValue({
       duplicates: [{
         lead_id: 'dup-1',
@@ -117,6 +117,10 @@ describe('Duplicates', () => {
     renderWithProviders(<Duplicates />);
     await waitFor(() => expect(screen.getByText('Merge into this')).toBeTruthy());
     fireEvent.click(screen.getByText('Merge into this'));
+    // Destructive action requires confirmation first — no call yet.
+    await waitFor(() => expect(screen.getByText('Merge these leads?')).toBeTruthy());
+    expect(mockedApi.leads.mergeDuplicate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Merge leads'));
     await waitFor(() => {
       expect(mockedApi.leads.mergeDuplicate).toHaveBeenCalledWith('dup-1', 'dup-2');
     });

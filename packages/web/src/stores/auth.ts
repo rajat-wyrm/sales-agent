@@ -10,6 +10,7 @@ interface AuthState {
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  revokeCurrentToken: () => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
   setTokens: (accessToken: string, refreshToken: string) => void;
   init: () => void;
@@ -34,14 +35,24 @@ export const useAuthStore = create<AuthState>()(
         api.defaults.headers.common['Authorization'] = `Bearer ${res.access_token}`;
       },
 
+      // Local teardown only, and deliberately free of any API call: the 401
+      // recovery path in lib/api.ts invokes this while holding the refresh lock,
+      // so a request here would re-enter that same interceptor with the already
+      // dead token and never settle (silent hang, no redirect). Callers that sign
+      // out voluntarily use revokeCurrentToken() first -- see components/Header.
       logout: async () => {
+        set({ user: null, token: null, refreshToken: null, isAuthenticated: false });
+        delete api.defaults.headers.common['Authorization'];
+      },
+
+      // Ask the server to blacklist the current access token. Only for
+      // user-initiated sign-out, where the token is still valid and the refresh
+      // lock is not held. Best effort: a failure must not block signing out.
+      revokeCurrentToken: async () => {
         try {
           await authApi.logout();
         } catch {
-          // ignore logout errors
-        } finally {
-          set({ user: null, token: null, refreshToken: null, isAuthenticated: false });
-          delete api.defaults.headers.common['Authorization'];
+          // ignore -- local teardown below is what actually ends the session
         }
       },
 

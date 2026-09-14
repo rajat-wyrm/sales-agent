@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useQuery } from 'react-query';
+import { useQuery, useQueryClient } from 'react-query';
 import { dashboard, admin, CreditUsageResponse, RunLog } from '@/lib/api';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatCard, StatCardGrid } from '@/components/ui/stat-card';
@@ -7,6 +7,9 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { PageLoader } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
+import { ErrorState } from '@/components/ui/error-state';
+import { useAuthStore } from '@/stores/auth';
+import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import {
   Users,
   Flame,
@@ -22,19 +25,33 @@ import {
 import { formatDateTime, stageMeta } from '@/lib/format';
 
 const STAGE_LABELS: Record<string, string> = {
-  discovered: 'Discovered',
-  enriched: 'Enriched',
-  verified: 'Verified',
-  drafted: 'Drafted',
-  contacted: 'Contacted',
-  replied: 'Replied',
-  bounced: 'Bounced',
+  discovered: 'Discovered', enriching: 'Enriching', enriched: 'Enriched',
+  verifying: 'Verifying', verified: 'Verified', ready_for_outreach: 'Ready',
+  message_generated: 'Messaged', drafted: 'Drafted', send_pending: 'Sending',
+  contacted: 'Contacted', sent: 'Sent', delivered: 'Delivered', replied: 'Replied',
+  converted: 'Converted', bounced: 'Bounced', contact_unavailable: 'No contact',
+  suppressed: 'Suppressed', send_failed: 'Send failed', provider_error: 'Provider error',
+  retry_pending: 'Retrying', enrichment_failed: 'Enrich failed', verification_failed: 'Verify failed',
 };
 
 const Analytics: React.FC = () => {
-  const { data: stats, isLoading: statsLoading } = useQuery('dashboard-stats', () => dashboard.stats());
-  const { data: credits, isLoading: creditsLoading } = useQuery('dashboard-credits', () => dashboard.credits());
-  const { data: runs, isLoading: runsLoading } = useQuery('dashboard-runs', () => admin.getRuns(20));
+  const queryClient = useQueryClient();
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
+  const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery('dashboard-stats', () => dashboard.stats(), { refetchInterval: 15000 });
+  const { data: credits, isLoading: creditsLoading } = useQuery('dashboard-credits', () => dashboard.credits(), { refetchInterval: 15000 });
+  // /runs is admin-only: don't fire it as sales_rep (was a 403 + a false "no runs" empty state).
+  const { data: runs, isLoading: runsLoading } = useQuery('dashboard-runs', () => admin.getRuns(20), {
+    enabled: isAdmin,
+    retry: false,
+  });
+
+  useSSE('/sse/token', (event) => {
+    if (isLeadLifecycleEvent(event.type)) {
+      queryClient.invalidateQueries('dashboard-stats');
+      queryClient.invalidateQueries('dashboard-credits');
+      if (isAdmin) queryClient.invalidateQueries('dashboard-runs');
+    }
+  });
 
   const funnelEntries = useMemo(() => {
     if (!stats?.funnel) return [];
@@ -49,6 +66,30 @@ const Analytics: React.FC = () => {
   const creditUsage: CreditUsageResponse | undefined = credits as CreditUsageResponse | undefined;
   const runList: RunLog[] = (runs as any)?.runs || [];
 
+  // Verification success + outreach delivery from the same stats payload.
+  const verifRows = ((stats as any)?.verification_7d || []) as Array<{ channel: string; result: string; count: string }>;
+  const verifTotal = verifRows.reduce((a, r) => a + Number(r.count), 0);
+  const verifOk = verifRows
+    .filter((r) => r.result === 'valid' || r.result === 'registered')
+    .reduce((a, r) => a + Number(r.count), 0);
+  const verifRate = verifTotal > 0 ? Math.round((verifOk / verifTotal) * 100) : null;
+  const outreachRows = ((stats as any)?.outreach_7d || []) as Array<{ channel: string; delivery_status: string; count: string }>;
+  const outTotal = outreachRows.reduce((a, r) => a + Number(r.count), 0);
+  const outSent = outreachRows
+    .filter((r) => ['sent', 'delivered'].includes(r.delivery_status))
+    .reduce((a, r) => a + Number(r.count), 0);
+  const outRate = outTotal > 0 ? Math.round((outSent / outTotal) * 100) : null;
+
+  // Stage-to-stage conversion along the happy path (shares, not transitions —
+  // honest about what a snapshot funnel can say).
+  const funnelMap = Object.fromEntries(funnelEntries.map(([s, c]) => [s, c as number])) as Record<string, number>;
+  const PATH = ['discovered', 'enriched', 'verified', 'drafted', 'contacted', 'replied'] as const;
+  const conversions = PATH.slice(1).map((stage, i) => {
+    const prev = funnelMap[PATH[i]] || 0;
+    const cur = funnelMap[stage] || 0;
+    return { stage, pct: prev > 0 ? Math.round((cur / prev) * 100) : null };
+  });
+
   const runStatusIcon = (run: RunLog) => {
     if (run.finished_at) return <CheckCircle2 className="h-4 w-4 text-success" />;
     if (run.started_at && !run.finished_at) return <Clock className="h-4 w-4 animate-pulse text-info" />;
@@ -57,6 +98,16 @@ const Analytics: React.FC = () => {
 
   if (statsLoading || creditsLoading || runsLoading) {
     return <PageLoader label="Loading analytics…" />;
+  }
+
+  if (statsError) {
+    return (
+      <ErrorState
+        title="Failed to load analytics"
+        message={(statsError as Error).message}
+        onRetry={() => refetchStats()}
+      />
+    );
   }
 
   return (
@@ -68,6 +119,8 @@ const Analytics: React.FC = () => {
         <StatCard icon={Flame} label="Hot Leads" value={stats?.totals?.hot ?? 0} tone="danger" />
         <StatCard icon={Sun} label="Warm Leads" value={stats?.totals?.warm ?? 0} tone="warning" />
         <StatCard icon={Snowflake} label="Cold Leads" value={stats?.totals?.cold ?? 0} tone="info" />
+        <StatCard icon={CheckCircle2} label="Verify Success · 7d" value={verifRate === null ? '—' : `${verifRate}%`} tone="success" hint={verifTotal > 0 ? `${verifOk}/${verifTotal} checks` : 'no checks yet'} />
+        <StatCard icon={Zap} label="Send Success · 7d" value={outRate === null ? '—' : `${outRate}%`} tone="info" hint={outTotal > 0 ? `${outSent}/${outTotal} sends` : 'no sends yet'} />
       </StatCardGrid>
 
       <Card>
@@ -108,8 +161,29 @@ const Analytics: React.FC = () => {
         </CardContent>
       </Card>
 
-      {creditUsage && (
-        <Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-primary" />
+            Stage Conversion
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="mb-4 text-[13px] text-muted-foreground">
+            Share of each stage relative to the previous one (snapshot shares, not tracked transitions).
+          </p>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            {conversions.map((c) => (
+              <div key={c.stage} className="rounded-lg border border-border bg-muted/40 p-3 text-center">
+                <p className="text-xs capitalize text-muted-foreground">→ {STAGE_LABELS[c.stage] || c.stage.replace(/_/g, ' ')}</p>
+                <p className="mt-1 text-xl font-semibold tabular-nums">{c.pct === null ? '—' : `${c.pct}%`}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {creditUsage && (        <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Zap className="h-5 w-5 text-warning" />
@@ -168,7 +242,9 @@ const Analytics: React.FC = () => {
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {runList.length === 0 ? (
+          {!isAdmin ? (
+            <EmptyState icon={BarChart3} title="Run history is admin-only." description="Ask an admin for scrape run details." />
+          ) : runList.length === 0 ? (
             <EmptyState icon={BarChart3} title="No runs recorded yet." description="Scrape runs will appear here once triggered." />
           ) : (
             <div className="overflow-x-auto">
