@@ -31,7 +31,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Immutable-raw-snapshot versioning (Track 3): bump when normalize_lead's
 # output contract changes so reprocessing can tell stale snapshots apart.
-PARSER_VERSION = "3"
+PARSER_VERSION = 3
 
 
 def content_hash_of(raw_payload: Any) -> str:
