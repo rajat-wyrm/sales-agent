@@ -1,7 +1,7 @@
 # PHASE_0_REVALIDATION
 
 > Evidence-first forensic revalidation of the HireGen-LeadGen repository against
-> `HireGen-LeadGen-SRS-v1.0.md`.
+> `docs/SRS.md`.
 
 ## Methodology
 

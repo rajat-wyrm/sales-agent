@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { URL } from 'url';
 
-export function extractDomain(jobUrl: string): string {
+function extractDomain(jobUrl: string): string {
   if (!jobUrl) return '';
   try {
     return new URL(jobUrl).hostname || '';
@@ -56,7 +56,7 @@ export function similarity(a: string, b: string): number {
   return 1 - distance / maxLength;
 }
 
-export function getCandidatePairString(companyName: string, jobTitle: string, jobUrl: string): string {
+function getCandidatePairString(companyName: string, jobTitle: string, jobUrl: string): string {
   const domain = extractDomain(jobUrl);
   const normalizedCompany = (companyName || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
   const normalizedTitle = (jobTitle || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();

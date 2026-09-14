@@ -98,7 +98,7 @@ export async function retry<T>(
   );
 }
 
-export interface FetchRetryOptions extends RequestInit {
+interface FetchRetryOptions extends RequestInit {
   retry?: number;
   retryMinTimeout?: number;
   retryMaxTimeout?: number;

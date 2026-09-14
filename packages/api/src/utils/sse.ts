@@ -1,7 +1,7 @@
 import { getRedis } from './redis';
 import { retry } from './httpClient';
 
-export type SSEEvent = {
+type SSEEvent = {
   type: string;
   lead_id?: string;
   [key: string]: unknown;

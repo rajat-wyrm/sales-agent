@@ -1,6 +1,6 @@
 # SRS COMPLIANCE GATE
 
-> Evidence-first compliance status for `HireGen-LeadGen-SRS-v1.0.md`
+> Evidence-first compliance status for `docs/SRS.md`
 
 ## Summary
 

@@ -91,13 +91,6 @@ export interface LeadDetail extends Lead {
   outreach_log: OutreachLog[];
 }
 
-export interface HRContactDetail extends HRContact {
-  contact_source?: string;
-  contact_method?: string;
-  contact_url?: string;
-  extraction_provenance?: any;
-  company_name?: string;
-}
 
 export interface EnrichmentLog {
   id: string;

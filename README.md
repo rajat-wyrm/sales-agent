@@ -232,19 +232,30 @@ ssh rajat@<host-ip>        # from another machine on your network
 
 ### Repo Layout
 ```
-up.sh                        ← THE one command
-docker-compose.yml           ← full stack definition
-.env / .env.example          ← configuration
+up.sh                     ← one command, Linux/macOS
+up.ps1                    ← same thing, Windows PowerShell
+docker-compose.yml        ← full stack definition
+.env / .env.example       ← configuration
 packages/
-  api/                       ← Fastify API (src/routes: auth, leads, companies,
-                               contacts, dashboard, admin, webhooks, ws)
-  web/                       ← React CRM (src/pages: Dashboard, Leads, …)
-  scrapers/                  ← Python scraper fleet + workers
-  api/database/              ← schema/ + migrations/ = canonical DB (see its README.md)
-  n8n/workflows/             ← n8n workflow definitions
-docs/                        ← SRS, compliance gate, traceability matrix
-.github/workflows/ci.yml     ← CI: tests + image builds (ghcr.io)
+  api/                    ← Fastify API — src/routes: auth, leads, companies,
+                            contacts, dashboard, admin, webhooks, ws
+    database/
+      schema/             ← tables, constraints, functions, triggers, indexes
+                            (source of truth for a FRESH install)
+      migrations/         ← forward-only deltas for an ALREADY-DEPLOYED db
+      seeds/ config/ utils/
+  web/                    ← React CRM — src/pages, components, hooks, stores, lib
+  scrapers/               ← Python fleet — scrapers/*.py per source,
+                            scrapers/utils/ shared logic, scrapers/spiders/ scrapy,
+                            main.py = FastAPI + consumer supervisor
+docs/                     ← SRS.md, PROGRESS.md, MASTER_PROMPT.md, compliance gate,
+                            traceability matrix, per-track design specs (superpowers/)
+.github/workflows/ci.yml  ← CI: typecheck + tests for all three packages, then
+                            image build & push to ghcr.io
 ```
+
+Note: n8n runs from the official `n8nio/n8n` image with its own Postgres DB and
+needs no files in this repo — the empty `packages/n8n/` placeholder was removed.
 
 ### Data Flow
 Scrapers write raw leads to Postgres via Redis queues → CRM shows them with a computed `lead_score` / `score_band` (hot ≥70, warm ≥40, cold <40) → per-lead enrichment/verification/drafting → outreach with full logging + webhook delivery events.
@@ -306,7 +317,7 @@ CI (`.github/workflows/ci.yml`) runs these plus Docker image builds (pushed to `
 
 ## Status
 
-**Phase 0 complete** (revalidation + pipeline skeleton, see `PROGRESS.md`), and the six-program follow-on is **implemented, tested and verified end to end**. Built per `HireGen-LeadGen-SRS-v1.0.md`; compliance details in `docs/SRS_COMPLIANCE_GATE.md`, per-track design records in `docs/superpowers/specs/`.
+**Phase 0 complete** (revalidation + pipeline skeleton, see `docs/PROGRESS.md`), and the six-program follow-on is **implemented, tested and verified end to end**. Built per `docs/SRS.md`; compliance details in `docs/SRS_COMPLIANCE_GATE.md`, per-track design records in `docs/superpowers/specs/`.
 
 | Track | Delivered |
 |---|---|

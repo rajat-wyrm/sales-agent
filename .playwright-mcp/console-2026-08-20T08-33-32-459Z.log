@@ -1,2 +1,0 @@
-[     111ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:5173/sse/token?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjE4MWQyNzczLTBhNWEtNDJkZi1iMjZmLWVjOWJjNjVjN2IyOSIsImVtYWlsIjoidGVzdEBleGFtcGxlLmNvbSIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTc4NzIxNDczOCwiZXhwIjoxNzg3ODE5NTM4fQ.G1qsiI_cfnwhok7kQb64vab2hRLJnsrMJ0BuB7JJgCI:0
-[     111ms] [WARNING] [SSE] Connection error: Event @ http://localhost:5173/assets/index-DoPgJN_I.js:223

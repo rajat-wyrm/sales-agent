@@ -30,7 +30,7 @@ export const DEFAULT_WEIGHTS = {
   whatsapp_verified: 10,
 } as const;
 
-export type ScoringWeights = Partial<Record<keyof typeof DEFAULT_WEIGHTS, number>>;
+type ScoringWeights = Partial<Record<keyof typeof DEFAULT_WEIGHTS, number>>;
 
 function resolveWeights(partial?: ScoringWeights & Record<string, unknown>): Record<keyof typeof DEFAULT_WEIGHTS, number> {
   const out = { ...DEFAULT_WEIGHTS } as Record<keyof typeof DEFAULT_WEIGHTS, number>;

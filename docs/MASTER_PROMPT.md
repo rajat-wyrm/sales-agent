@@ -1,6 +1,6 @@
 # MASTER PROMPT — Lead Development Agent for `sales-agent`
 
-You are the lead engineer for this repository. Before writing a single line of code, read `HireGen-LeadGen-SRS-v1.0.md` in this folder (`sales-agent/`) fully, top to bottom. That document is your **single source of truth**. Everything below tells you *how* to work through it — not what to build, that's already specified. Do not start coding until you have read the whole SRS once.
+You are the lead engineer for this repository. Before writing a single line of code, read `docs/SRS.md` in this folder (`sales-agent/`) fully, top to bottom. That document is your **single source of truth**. Everything below tells you *how* to work through it — not what to build, that's already specified. Do not start coding until you have read the whole SRS once.
 
 ---
 
@@ -34,7 +34,7 @@ Follow SRS §15's phase order (Phase 0 → 7). For every phase:
 - **State the goal of the phase in one sentence** before starting.
 - **Build the smallest vertical slice that proves the phase works end-to-end**, not the largest surface area. E.g., Phase 1 = one Tier-1 source + normalizer + dedup + a row in Postgres you can actually query — not five sources half-wired.
 - **Test it for real.** Run the scraper against a live source and show real output. Run the API endpoint and show a real response. Never claim a phase is complete on the basis of code that "looks correct."
-- **Update a running `PROGRESS.md`** in the repo after each phase: what's done, what's stubbed/fallback-only, what's explicitly deferred, and any deviation from the SRS with the reason. This is your own audit trail — treat it as seriously as the code.
+- **Update a running `docs/PROGRESS.md`** in the repo after each phase: what's done, what's stubbed/fallback-only, what's explicitly deferred, and any deviation from the SRS with the reason. This is your own audit trail — treat it as seriously as the code.
 - **Flag scope creep in either direction.** If you find yourself building something the SRS didn't ask for, stop and ask whether it's actually required. If you find the SRS asked for something that's genuinely infeasible on the free tier at claimed volume, say so before burning time implementing a broken assumption.
 
 ---
@@ -64,10 +64,10 @@ Follow SRS §15's phase order (Phase 0 → 7). For every phase:
 
 ## 5. Definition of Done (per phase and overall)
 
-A phase is done when: it runs against real data, its failure paths have been deliberately triggered and observed to degrade gracefully (not crash), it's covered by `PROGRESS.md`, and you can honestly say — not hope — that it matches the corresponding SRS section.
+A phase is done when: it runs against real data, its failure paths have been deliberately triggered and observed to degrade gracefully (not crash), it's covered by `docs/PROGRESS.md`, and you can honestly say — not hope — that it matches the corresponding SRS section.
 
 The project is done when all 7 phases meet that bar, the success criteria in SRS §16 are measurable (not aspirational) against a real run, and total infrastructure cost is verifiably $0/month as claimed.
 
 ---
 
-**Start now: read `HireGen-LeadGen-SRS-v1.0.md`, then execute §1 of this prompt (Pre-Flight) and report back before writing any code.**
+**Start now: read `docs/SRS.md`, then execute §1 of this prompt (Pre-Flight) and report back before writing any code.**

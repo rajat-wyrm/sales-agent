@@ -1,6 +1,6 @@
 import { getDB } from './db';
 
-export interface AuditEvent {
+interface AuditEvent {
   user_id: string | null;
   action: string;
   resource_type: string;
