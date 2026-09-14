@@ -503,6 +503,14 @@ async def fallback_hr_cascade(
 
 
 _whois_cache: dict[str, tuple[str | None, dict[str, Any]]] = {}
+# WHOIS uses port 43, which many container networks and cloud egress policies
+# block outright. Without a breaker every lead then pays 4 sequential 10s
+# timeouts (~40s per company) to learn the same thing again. After this many
+# consecutive total failures we stop trying for the process lifetime and record
+# why, so the cascade degrades instead of stalling.
+_WHOIS_MAX_CONSECUTIVE_FAILURES = 3
+_whois_consecutive_failures = 0
+_whois_disabled = False
 
 
 async def run_whois_lookup(company_name: str) -> tuple[str | None, dict[str, Any]]:
@@ -512,8 +520,12 @@ async def run_whois_lookup(company_name: str) -> tuple[str | None, dict[str, Any
 
     Returns (email, metadata) where metadata includes registrar, error, etc.
     """
+    global _whois_consecutive_failures, _whois_disabled
+
     if company_name in _whois_cache:
         return _whois_cache[company_name]
+    if _whois_disabled:
+        return None, {"registrar": "", "error": "whois_disabled_after_repeated_failures"}
 
     meta: dict[str, Any] = {"registrar": "", "error": ""}
 
@@ -534,6 +546,7 @@ async def run_whois_lookup(company_name: str) -> tuple[str | None, dict[str, Any
                         # Only return emails that look like real contact addresses
                         # (not abuse@, postmaster@, etc.)
                         if "@" in str(email) and not str(email).startswith(("abuse@", "postmaster@", "admin@")):
+                            _whois_consecutive_failures = 0
                             _whois_cache[company_name] = (str(email), meta)
                             return str(email), meta
             except asyncio.TimeoutError:
@@ -544,10 +557,19 @@ async def run_whois_lookup(company_name: str) -> tuple[str | None, dict[str, Any
     except ImportError:
         logger.warning("python-whois not installed")
         meta["error"] = "python-whois not installed"
+        _whois_disabled = True
     except Exception as e:
         logger.debug(f"WHOIS lookup failed for {company_name}: {e}")
         meta["error"] = str(e)
 
+    # Reached only when no TLD produced a usable registrant email.
+    _whois_consecutive_failures += 1
+    if _whois_consecutive_failures >= _WHOIS_MAX_CONSECUTIVE_FAILURES:
+        _whois_disabled = True
+        logger.warning(
+            f"WHOIS disabled after {_whois_consecutive_failures} consecutive failures "
+            "(port 43 is commonly blocked from container networks); skipping further lookups"
+        )
     _whois_cache[company_name] = (None, meta)
     return None, meta
 
