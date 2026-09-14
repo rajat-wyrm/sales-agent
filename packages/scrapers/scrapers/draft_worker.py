@@ -219,24 +219,13 @@ async def process_draft_job(
         if not gemini_key:
             # Try user-supplied key. `requested_by` may be a scheduled sentinel
             # ("system"/"daily_scheduler"), not a UUID -> coerce or skip lookup.
-            user_id = None
-            try:
-                from uuid import UUID
-                user_id = UUID(str(requested_by))
-            except (ValueError, TypeError):
-                user_id = None
-            user_row = await conn.fetchrow(
-                "SELECT api_keys FROM users WHERE id = $1",
-                user_id,
-            ) if user_id else None
-            if user_row and user_row["api_keys"]:
-                try:
-                    from .crypto_utils.decrypt import decrypt_api_key
-                    keys = user_row["api_keys"]
-                    if isinstance(keys, dict) and "gemini" in keys:
-                        gemini_key = decrypt_api_key(keys["gemini"])
-                except Exception as e:
-                    logger.warning(f"Failed to decrypt Gemini key: {e}")
+            # Same fallback as the other workers: a scheduled drafting run has no
+            # requesting user, so without this it never found the Gemini key that
+            # Settings saved and silently used the template instead.
+            from .utils.job_keys import resolve_job_user
+            _, _keys = await resolve_job_user(conn, requested_by)
+            if _keys.get("gemini"):
+                gemini_key = _keys["gemini"]
 
         result = None
         if gemini_key:

@@ -36,7 +36,13 @@ async def call_contactout(hr_linkedin_url: str, api_key: str) -> dict[str, Any] 
     """Call ContactOut API with LinkedIn URL. Returns extracted contact data or None."""
     import httpx
 
-    url = "https://api.contactout.com/v3/linkedin"
+    # Verified live: api.contactout.com returns HTTP 404 with an HTML page for
+    # every path tried (/v3/linkedin, /api/v1/search, /v1/profile), and
+    # api.contactout.me does not resolve -- ContactOut ships a browser extension
+    # and a private dashboard API, not a documented public REST endpoint. So this
+    # call cannot be made to work by fixing a URL; keep it honest instead of
+    # pretending. Override CONTACTOUT_API_URL once a real endpoint/token is issued.
+    url = os.environ.get("CONTACTOUT_API_URL", "https://api.contactout.com/v3/linkedin")
     params = {"profile:linkedin": hr_linkedin_url}
     headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -44,7 +50,14 @@ async def call_contactout(hr_linkedin_url: str, api_key: str) -> dict[str, Any] 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, params=params, headers=headers)
             if resp.status_code != 200:
-                logger.warning(f"ContactOut returned {resp.status_code}")
+                logger.warning(
+                    f"ContactOut returned {resp.status_code} from {url} "
+                    "(no public REST API is published for this vendor)"
+                )
+                return None
+            if "json" not in resp.headers.get("content-type", ""):
+                # An HTML body here means we hit a marketing 404 page, not an API.
+                logger.warning("ContactOut replied with non-JSON; endpoint is not an API")
                 return None
             data = resp.json()
             return {
@@ -64,21 +77,33 @@ async def call_snovio(hr_name: str, company_name: str, company_domain: str, api_
     """Call Snov.io email finder API. Returns extracted contact data or None."""
     import httpx
 
-    # Step 1: Get email
-    url = "https://api.snov.io/v2/lead-enrichment"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    data = {
-        "email": "",
-        "fullName": hr_name,
+    # Verified live: v1/get-emails-from-names exists (403 without entitlement),
+    # while the previously coded v2/lead-enrichment returns 404 "url or entity not
+    # found" -- it does not exist, so every call failed regardless of the key.
+    # Snov authenticates with access_token as a query param, not a bearer header.
+    url = "https://api.snov.io/v1/get-emails-from-names"
+    first, _, last = hr_name.partition(" ")
+    params = {
+        "firstName": first,
+        "lastName": last or first,
         "companyName": company_name,
         "domain": company_domain,
+        "type": "all",
+        "access_token": api_key,
     }
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=headers, data=data)
+            resp = await client.get(url, params=params)
             if resp.status_code != 200:
-                logger.warning(f"Snov.io returned {resp.status_code}")
+                # 403 means the account lacks the Email Finder entitlement; say so
+                # instead of logging a bare status the operator cannot act on.
+                detail = ""
+                try:
+                    detail = str(resp.json().get("errors", {}).get("title", ""))[:120]
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(f"Snov.io returned {resp.status_code}{f': {detail}' if detail else ''}")
                 return None
             body = resp.json()
             emails = body.get("emails", [])
@@ -399,34 +424,10 @@ async def process_enrichment_job(
         # runs pass sentinels like "system"/"daily_scheduler". Coerce to a real
         # UUID (or None) so neither the users lookup nor the enrichment_log
         # FK insert dies on a non-UUID string.
-        user_id: Any = None
-        try:
-            from uuid import UUID
-            user_id = UUID(str(requested_by))
-        except (ValueError, TypeError):
-            user_id = None
-
-        # Load user-supplied API keys from DB (only for a real user run).
-        api_keys: dict[str, str] = {}
-        user_row = await conn.fetchrow(
-            "SELECT api_keys FROM users WHERE id = $1",
-            user_id,
-        ) if user_id else None
-        if user_row and user_row["api_keys"]:
-            try:
-                from .crypto_utils.decrypt import decrypt_api_key
-                encrypted = user_row["api_keys"]
-                for k, v in encrypted.items():
-                    if isinstance(v, str):
-                        try:
-                            api_keys[k] = decrypt_api_key(v)
-                        except Exception:
-                            # decrypt failed — do NOT forward the ciphertext blob
-                            # to a vendor as if it were a real key (garbage auth +
-                            # potential key-format oracle). Skip this provider.
-                            continue
-            except Exception:
-                pass
+        # Requesting user (None for automated runs) plus their vendor keys; falls
+        # back to the key-owning account so scheduled jobs use paid providers too.
+        from .utils.job_keys import resolve_job_user
+        user_id, api_keys = await resolve_job_user(conn, requested_by)
 
         enrichment_result: dict[str, Any] | None = None
         used_provider = "osint_fallback"

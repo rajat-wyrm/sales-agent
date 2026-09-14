@@ -48,10 +48,15 @@ class RedditScraper(BaseScraper):
         self._user_agent = user_agent
 
     async def scrape(self) -> list[dict[str, Any]]:
-        client_id = self._client_id or "REDDIT_CLIENT_ID"
-        client_secret = self._client_secret or "REDDIT_CLIENT_SECRET"
+        # Read the environment instead of using the variable NAME as a sentinel
+        # fallback: previously `or "REDDIT_CLIENT_ID"` meant a real key set in the
+        # env was ignored and only an explicit constructor argument worked.
+        import os
 
-        if client_id == "REDDIT_CLIENT_ID" or not client_id or not client_secret:
+        client_id = self._client_id or os.environ.get("REDDIT_CLIENT_ID", "")
+        client_secret = self._client_secret or os.environ.get("REDDIT_CLIENT_SECRET", "")
+
+        if not client_id or not client_secret:
             raise ScraperError(
                 "Reddit API credentials not configured (REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET)"
             )

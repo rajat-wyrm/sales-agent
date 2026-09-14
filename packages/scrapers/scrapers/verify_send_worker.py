@@ -141,23 +141,10 @@ async def process_verify_and_send_job(
         # Step 2: Send if verification passes
         results = []
 
-        user_row = await conn.fetchrow(
-            "SELECT api_keys FROM users WHERE id = $1",
-            user_id,
-        ) if user_id else None
-        api_keys: dict[str, str] = {}
-        if user_row and user_row["api_keys"]:
-            try:
-                from .crypto_utils.decrypt import decrypt_api_key
-                encrypted = user_row["api_keys"]
-                for k, v in encrypted.items():
-                    if isinstance(v, str):
-                        try:
-                            api_keys[k] = decrypt_api_key(v)
-                        except Exception:
-                            continue  # skip undecryptable key; never forward ciphertext
-            except Exception:
-                pass
+        # Keys resolve to the key-owning account on automated runs (see
+        # utils/job_keys); user_id above still records who actually asked.
+        from .utils.job_keys import resolve_job_user
+        _, api_keys = await resolve_job_user(conn, requested_by)
 
         import os
         from_email = os.environ.get("EMAIL_FROM", "leads@hiregen.ai")

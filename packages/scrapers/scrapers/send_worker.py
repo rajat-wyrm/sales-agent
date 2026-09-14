@@ -319,24 +319,12 @@ async def process_send_job(
                      "reason": "cooldown", "timestamp": asyncio.get_event_loop().time()})
                 return
 
-        # Load user-supplied API keys
-        user_row = await conn.fetchrow(
-            "SELECT api_keys FROM users WHERE id = $1",
-            user_id,
-        ) if user_id else None
-        api_keys: dict[str, str] = {}
-        if user_row and user_row["api_keys"]:
-            try:
-                from .crypto_utils.decrypt import decrypt_api_key
-                encrypted = user_row["api_keys"]
-                for k, v in encrypted.items():
-                    if isinstance(v, str):
-                        try:
-                            api_keys[k] = decrypt_api_key(v)
-                        except Exception:
-                            continue  # never forward undecryptable ciphertext
-            except Exception:
-                pass
+        # Vendor keys. sent_by keeps the real requesting user (None for scheduled
+        # runs), but keys resolve to the key-owning account when there is no
+        # requester -- otherwise a daily send ran with nothing configured and
+        # every message failed even after the user pasted their Resend key.
+        from .utils.job_keys import resolve_job_user
+        _, api_keys = await resolve_job_user(conn, requested_by)
 
         from_email = os.environ.get("EMAIL_FROM", "leads@hiregen.ai")
         resend_key = api_keys.get("resend") or os.environ.get("RESEND_API_KEY")

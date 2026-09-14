@@ -43,17 +43,30 @@ def _derive_key() -> bytes:
     )
 
 
+# Wire format written by packages/api/src/utils/crypto.ts encryptText():
+#   base64( iv[12] || authTag[16] || ciphertext )
+# Python's AESGCM instead wants iv || ciphertext || authTag, so the tag must be
+# moved before decrypting. The previous code did `tag + ciphertext`, which kept
+# the two halves in the wrong order: every key saved through the UI failed to
+# decrypt with InvalidTag, so paid providers silently never ran.
+_IV_LEN = 12
+_TAG_LEN = 16
+
+
 def decrypt_text(encrypted: str) -> str:
-    """Decrypt an AES-256-GCM encrypted string (base64 of IV+tag+ciphertext)."""
+    """Decrypt a key produced by the API's encryptText() (IV+TAG+ciphertext)."""
     if not _AESGCM_AVAILABLE:
         raise RuntimeError("cryptography package is required for decryption")
     key = _derive_key()
     data = base64.b64decode(encrypted)
-    iv = data[:12]
-    tag = data[12:28]
-    ciphertext = data[28:]
+    if len(data) < _IV_LEN + _TAG_LEN:
+        raise ValueError("encrypted payload too short")
+    iv = data[:_IV_LEN]
+    tag = data[_IV_LEN:_IV_LEN + _TAG_LEN]
+    ciphertext = data[_IV_LEN + _TAG_LEN:]
     aesgcm = AESGCM(key)
-    plaintext = aesgcm.decrypt(iv, tag + ciphertext, None)
+    # Reassemble as cryptography expects: nonce || ciphertext || tag.
+    plaintext = aesgcm.decrypt(iv, ciphertext + tag, None)
     return plaintext.decode("utf-8")
 
 

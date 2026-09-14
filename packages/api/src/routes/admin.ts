@@ -5,7 +5,7 @@ import { getDB } from '../utils/db';
 import { getRedis } from '../utils/redis';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
-import { encryptApiKeys, decryptApiKeys, maskApiKeys } from '../utils/crypto';
+import { encryptApiKeys, maskApiKeys } from '../utils/crypto';
 import { logAuditEvent } from '../utils/audit';
 
 const triggerRunSchema = z.object({
@@ -13,13 +13,26 @@ const triggerRunSchema = z.object({
 });
 
 const settingsSchema = z.object({
+  // Every field the Settings page renders must be accepted here. Keys omitted
+  // from this schema were silently dropped on save, so a user could paste an
+  // Adzuna/Reddit/Telegram credential, see it accepted, and nothing used it.
   api_keys: z.object({
     snovio: z.string().optional(),
+    snovio_secret: z.string().optional(),
     contactout: z.string().optional(),
     resend: z.string().optional(),
     brevo: z.string().optional(),
     gemini: z.string().optional(),
     whatsapp: z.string().optional(),
+    reacher: z.string().optional(),
+    adzuna_app_id: z.string().optional(),
+    adzuna_app_key: z.string().optional(),
+    jooble: z.string().optional(),
+    twitter: z.string().optional(),
+    reddit_client_id: z.string().optional(),
+    reddit_client_secret: z.string().optional(),
+    telegram_api_id: z.string().optional(),
+    telegram_api_hash: z.string().optional(),
   }).optional(),
   scraper_config: z.object({
     max_concurrency: z.number().min(1).optional(),
@@ -177,16 +190,7 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
       const { api_keys } = parseResult.data;
 
       const sql = getDB();
-      const encryptedKeys = api_keys
-        ? encryptApiKeys({
-            snovio: api_keys.snovio,
-            contactout: api_keys.contactout,
-            resend: api_keys.resend,
-            brevo: api_keys.brevo,
-            gemini: api_keys.gemini,
-            whatsapp: api_keys.whatsapp,
-          })
-        : {};
+      const encryptedKeys = api_keys ? encryptApiKeys(api_keys) : {};
 
       await sql.unsafe(
         `UPDATE users SET api_keys = $1::jsonb, updated_at = NOW() WHERE id = $2`,
@@ -273,8 +277,7 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
 
     // SECURITY: never return decrypted provider secrets to the client. Report
     // only a masked view (last-4) so the UI can show state without exfiltrating
-    // credentials. decryptApiKeys stays used elsewhere for server-side calls.
-    void decryptApiKeys;
+    // credentials.
     let masked: Record<string, string> = {};
     if (result[0]?.api_keys) {
       const parsedKeys =

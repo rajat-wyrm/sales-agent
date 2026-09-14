@@ -129,6 +129,20 @@ async def verify_email_reacher(email: str, reacher_url: str | None = None) -> di
         return {"status": "unknown", "raw": {"error": str(e)}}
 
 
+def _wa_configured(base: str | None) -> bool:
+    """Is a WhatsApp endpoint actually configured for this deployment?
+
+    WHATSAPP_WEB_URL defaults to localhost:3050 in .env.example, which is wrong
+    from inside a container and points at nothing until the service exists. Treat
+    an unset value as unconfigured so callers can say so explicitly rather than
+    attempting a doomed connection.
+    """
+    if not base or not base.strip():
+        return False
+    b = base.strip().lower()
+    return "localhost" not in b and "127.0.0.1" not in b
+
+
 async def verify_whatsapp(
     phone: str, whatsapp_url: str | None = None
 ) -> dict[str, Any]:
@@ -139,7 +153,14 @@ async def verify_whatsapp(
     """
     import httpx
 
-    url = (whatsapp_url or os.environ.get("WHATSAPP_WEB_URL", "http://localhost:3050")) + "/check"
+    base = whatsapp_url or os.environ.get("WHATSAPP_WEB_URL", "")
+    if not _wa_configured(base):
+        # Fail fast and honestly instead of spending a 30s timeout on a service
+        # that is not deployed: the previous behaviour logged an opaque
+        # "All connection attempts failed" that read like a WhatsApp rejection.
+        return {"status": "unknown", "raw": {"error": "whatsapp_not_configured"}}
+
+    url = base.rstrip("/") + "/check"
     params = {"phone": phone}
 
     try:
