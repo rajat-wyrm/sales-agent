@@ -17,6 +17,7 @@ corpus can auto-grow from companies we've already ingested.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ SOURCE_EXTRAS: dict[str, list[str]] = {
     "recruitee": ["gong", "personio", "teamleader", "mews", "travelperk", "hotjar", "booksy"],
     "breezy": ["breezy", "remotemigration", "wethecollective", "growbots", "applitools"],
     "teamtailor": ["deezer", "productmarketing", "testworks", "blueground"],
+    # verified public boards (200 OK in pre-flight, 2026-09-14)
+    "bamboohr": ["freshworks"],
+    "personio": ["personio"],
 }
 
 MAX_BOARDS = 40  # bounded: fits the per-source scrape budget even before concurrency
@@ -79,3 +83,36 @@ def corpus_for(source: str) -> list[str]:
         if len(out) >= MAX_BOARDS:
             break
     return out
+
+
+# Flywheel: learn new ATS boards from job URLs we've already ingested
+# (e.g. a boards.greenhouse.io/<slug> posting for a company we never probe).
+# Suggestions only — the operator promotes them to SOURCE_EXTRAS after the
+# board verifies (standing rule: no unverified patterns).
+_ATS_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("greenhouse", re.compile(r"boards\.greenhouse\.io/([a-z0-9][a-z0-9\-_]*)", re.I)),
+    ("lever", re.compile(r"jobs\.lever\.co/([a-z0-9][a-z0-9\-_]*)", re.I)),
+    ("bamboohr", re.compile(r"([a-z0-9][a-z0-9\-_]*)\.bamboohr\.com/careers", re.I)),
+    ("personio", re.compile(r"([a-z0-9][a-z0-9\-_]*)\.jobs\.personio\.com", re.I)),
+    ("ashby", re.compile(r"jobs\.ashbyhq\.com/([a-z0-9][a-z0-9\-_]*)", re.I)),
+    ("workday", re.compile(r"([a-z0-9]+\.[a-z]+\.myworkdayjobs\.com)", re.I)),
+]
+
+
+def suggest_new_slugs(job_urls: list[str]) -> dict[str, list[str]]:
+    """Extract (ats, slug) pairs from ingested job URLs, minus slugs already
+    in that ATS's corpus. Pure function — the caller decides what to promote."""
+    known: dict[str, set[str]] = {
+        ats: {s.lower() for s in (SOURCE_EXTRAS.get(ats, []) + SHARED_CORPUS)}
+        for ats, _ in _ATS_URL_PATTERNS
+    }
+    found: dict[str, set[str]] = {}
+    for url in job_urls or []:
+        for ats, rx in _ATS_URL_PATTERNS:
+            m = rx.search(url or "")
+            if not m:
+                continue
+            slug = m.group(1).lower()
+            if slug and slug not in known.get(ats, set()):
+                found.setdefault(ats, set()).add(slug)
+    return {ats: sorted(slugs) for ats, slugs in found.items() if slugs}

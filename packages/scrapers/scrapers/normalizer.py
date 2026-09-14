@@ -28,9 +28,19 @@ from urllib.parse import urlparse
 import redis.asyncio as redis
 import asyncpg
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+# Immutable-raw-snapshot versioning (Track 3): bump when normalize_lead's
+# output contract changes so reprocessing can tell stale snapshots apart.
+PARSER_VERSION = "3"
+
+
+def content_hash_of(raw_payload: Any) -> str:
+    """Deterministic sha256 over the canonical raw payload (change detection)."""
+    canonical = json.dumps(raw_payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 from .utils.fresher_classifier import is_fresher_role as classify_fresher
 from .utils.india_filter import is_india_relevant, derive_company_domain
-from .queue import chain_lead
+from .queue import chain_lead, requeue_or_dlq, reliable_brpop, ack
 from .utils.career_page_extractor import (
     extract_from_career_page,
     extract_from_job_posting_page,
@@ -961,8 +971,9 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
     )
     if existing:
         await sql.execute(
-            "UPDATE job_postings SET last_seen_at = NOW(), raw_payload = $1 WHERE id = $2",
+            "UPDATE job_postings SET last_seen_at = NOW(), raw_payload = $1, content_hash = $2 WHERE id = $3",
             json.dumps(normalized["raw_payload"]),
+            content_hash_of(normalized["raw_payload"]),
             existing,
         )
         logger.info(f"Lead deduped (fingerprint match): {fp}")
@@ -975,8 +986,9 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
     )
     if old_existing:
         await sql.execute(
-            "UPDATE job_postings SET first_seen_at = NOW(), last_seen_at = NOW(), raw_payload = $1 WHERE id = $2",
+            "UPDATE job_postings SET first_seen_at = NOW(), last_seen_at = NOW(), raw_payload = $1, content_hash = $2 WHERE id = $3",
             json.dumps(normalized["raw_payload"]),
+            content_hash_of(normalized["raw_payload"]),
             old_existing,
         )
         job_id = old_existing
@@ -998,6 +1010,21 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
     )
     company_id = company["id"] if company else None
     if not company_id:
+        # Suffix-insensitive fallback ("Adani Group" vs "Adani"): only on an
+        # exact/domain miss, so the hot path stays indexed. Display names keep
+        # their original form — this only prevents duplicate company rows.
+        from .utils.india_filter import canonical_company_key
+        want = canonical_company_key(normalized["company_name"])
+        if want:
+            rows = await sql.fetch("SELECT id, name FROM companies")
+            for r in rows:
+                if canonical_company_key(r["name"]) == want:
+                    company_id = r["id"]
+                    logger.info(
+                        f"Company matched canonically: {normalized['company_name']} -> {r['name']}"
+                    )
+                    break
+    if not company_id:
         company_id = await sql.fetchval(
             "INSERT INTO companies (name, domain, about) VALUES ($1, $2, $3) RETURNING id",
             normalized["company_name"],
@@ -1005,13 +1032,37 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             normalized["about_company"][:500] if normalized["about_company"] else None,
         )
 
-    # Find or create HR contact
-    hr = await sql.fetchrow(
-        "SELECT id FROM hr_contacts WHERE linkedin_url = $1 OR personal_email = $2 LIMIT 1",
-        normalized["hr_linkedin_url"],
-        normalized["hr_email"],
-    )
-    hr_id = hr["id"] if hr else None
+    # Find or create HR contact.
+    #
+    # A contact is a person AT ONE EMPLOYER, so reuse must be scoped to that
+    # employer and must key on a value we actually extracted. Two bugs lived here:
+    #
+    #  1. `linkedin_url = $1 OR personal_email = $2` with both arguments '' matched
+    #     every stored contact whose column was also '' (empty string, not NULL),
+    #     because '' = '' is true in SQL. One such row got attached to ~137 leads
+    #     across 76 unrelated companies.
+    #  2. Even a genuine hit was matched globally, ignoring company: a recruiter
+    #     who moves employers, or a search result that surfaces the same popular
+    #     profile for many queries, silently became everyone's HR contact.
+    #
+    # So: only look up non-empty values, and only within this lead's own company.
+    hr_lookup_linkedin = (normalized["hr_linkedin_url"] or "").strip()
+    hr_lookup_email = (normalized["hr_email"] or "").strip()
+    hr_id = None
+    if hr_lookup_linkedin or hr_lookup_email:
+        hr = await sql.fetchrow(
+            """SELECT id FROM hr_contacts
+                WHERE current_company_id = $1
+                  AND ((linkedin_url IS NOT NULL AND linkedin_url <> ''
+                        AND linkedin_url = $2)
+                    OR (personal_email IS NOT NULL AND personal_email <> ''
+                        AND personal_email = $3))
+                LIMIT 1""",
+            company_id,
+            hr_lookup_linkedin,
+            hr_lookup_email,
+        )
+        hr_id = hr["id"] if hr else None
     # Derive contact_source, contact_method, contact_url from provenance
     provenance = normalized.get("hr_extraction_provenance") or {}
     stages = provenance.get("stages", []) if isinstance(provenance, dict) else []
@@ -1026,12 +1077,15 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             contact_url = result["url"]
             break
     confidence = int(float(first_stage.get("confidence", 0)) * 100) if first_stage else 0
-    if normalized["hr_name"] and not hr_id:
+    # A contact row must carry at least one real way to reach the person; a name
+    # alone is not contactable and would pollute the table (and the outreach
+    # pipeline reads email/mobile/linkedin off this row).
+    if normalized["hr_name"] and (hr_lookup_email or hr_lookup_linkedin) and not hr_id:
         hr_id = await sql.fetchval(
             "INSERT INTO hr_contacts (full_name, linkedin_url, personal_email, personal_mobile, "
             "current_company_id, contact_source, contact_method, contact_url, confidence_score, "
             "extraction_provenance) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+            "VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9, $10) RETURNING id",
             normalized["hr_name"],
             normalized["hr_linkedin_url"],
             normalized["hr_email"],
@@ -1056,8 +1110,9 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
         job_id = await sql.fetchval(
             """INSERT INTO job_postings
                (company_id, hr_contact_id, title, description, experience_level,
-                salary_range, job_url, source_site, fingerprint, raw_payload)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                salary_range, job_url, source_site, fingerprint, raw_payload,
+                parser_version, content_hash)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                RETURNING id""",
             company_id,
             hr_id,
@@ -1069,20 +1124,25 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             normalized["source_site"],
             normalized["fingerprint"],
             json.dumps(normalized["raw_payload"]),
+            PARSER_VERSION,
+            content_hash_of(normalized["raw_payload"]),
         )
 
-    # Insert lead
+    # Insert lead (legal_basis/purpose default at DB level: legitimate-interest B2B outreach)
     lead_id = await sql.fetchval(
-        """INSERT INTO leads (job_posting_id, company_id, hr_contact_id, data_quality, 
-           possible_duplicate_of, hr_extraction_provenance)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-         job_id,
-         company_id,
-         hr_id,
-         normalized["data_quality"],
-         possible_dup_id,
-         json.dumps(normalized.get("hr_extraction_provenance", {})),
-     )
+        """INSERT INTO leads (job_posting_id, company_id, hr_contact_id, data_quality,
+           possible_duplicate_of, hr_extraction_provenance, legal_basis, processing_purpose, provenance)
+           VALUES ($1, $2, $3, $4, $5, $6, 'legitimate_interest_b2b', 'b2b_recruitment_outreach',
+                   jsonb_build_object('source_site', $7::text, 'discovered_at', now()::text))
+           RETURNING id""",
+          job_id,
+          company_id,
+          hr_id,
+          normalized["data_quality"],
+          possible_dup_id,
+          json.dumps(normalized.get("hr_extraction_provenance", {})),
+          normalized.get("source_site"),
+      )
 
     return lead_id
 
@@ -1116,18 +1176,20 @@ async def _normalize_worker(
     processed = 0
 
     while True:
+        raw_data: Any = None
+        raw_msg: Any = None
         try:
-            result = await redis_client.brpop("raw_leads_queue:requests", timeout=5)
-            if result is None:
+            got = await reliable_brpop(redis_client, "raw_leads_queue:requests", timeout=5)
+            if got is None:
                 continue
-
-            raw_data = json.loads(result[1])
+            raw_msg, raw_data = got
             processed += 1
 
             normalized = normalize_lead(raw_data)
 
             if not normalized["is_fresher"]:
                 logger.info(f"Skipping non-fresher job: {normalized['job_title']}")
+                await ack(redis_client, "raw_leads_queue:requests", raw_msg)
                 continue
 
             # Product correction: India-only. Discard out-of-scope (non-India)
@@ -1137,6 +1199,7 @@ async def _normalize_worker(
                     f"Skipping non-India job: {normalized['job_title']} "
                     f"[{normalized.get('source_site')}] loc='{normalized.get('location')}'"
                 )
+                await ack(redis_client, "raw_leads_queue:requests", raw_msg)
                 continue
 
             # Enrich HR data with LinkedIn cross-reference and OSINT per SRS §4.5
@@ -1147,13 +1210,28 @@ async def _normalize_worker(
                 if lead_id:
                     inserted += 1
                     await chain_lead(redis_client, "enrichment_queue:requests", lead_id, provider="auto", requested_by=normalized.get("requested_by", "system"))
+                await ack(redis_client, "raw_leads_queue:requests", raw_msg)
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error in normalizer: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "raw_leads_queue:requests", raw_msg)
         except asyncpg.PostgresError as e:
             logger.error(f"PostgreSQL error in normalizer: {e}")
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "raw_leads_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "raw_leads_queue:requests", raw_data)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as e:
             logger.error(f"Unexpected error in normalizer: {e}")
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "raw_leads_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "raw_leads_queue:requests", raw_data)
+            except Exception:  # noqa: BLE001
+                pass
 
     return inserted
 

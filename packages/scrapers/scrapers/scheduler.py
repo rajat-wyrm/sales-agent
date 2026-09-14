@@ -30,6 +30,26 @@ _HOUR = int(os.environ.get("DAILY_SCRAPE_HOUR", "3"))
 _MINUTE = int(os.environ.get("DAILY_SCRAPE_MINUTE", "0"))
 _CATCHUP_AT_BOOT = os.environ.get("DAILY_SCRAPE_CATCHUP", "0") == "1"
 
+# Source toggles (Settings UI -> settings.sources_enabled): the daily fleet and
+# manual army runs skip disabled sources. Unset/empty -> all defaults.
+async def load_enabled_sources(db_pool) -> list[str] | None:
+    """Explicit enabled-source list, or None when the operator never toggled."""
+    if db_pool is None:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchval(
+                "SELECT value FROM settings WHERE key = 'sources_enabled'"
+            )
+        if not isinstance(row, dict):
+            return None
+        enabled = [k for k, v in row.items() if v]
+        return enabled or None
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"sources_enabled unreadable, using defaults: {e}")
+        return None
+
+
 # Data-retention (DPDP 'storage limitation'): personal data must not be kept
 # longer than needed. Opt-in via env (0/absent = disabled) so it never surprises
 # an operator; when set, once per day we ANONYMISE (not hard-delete) stale, never
@@ -202,13 +222,17 @@ async def _claim_day(redis_client, when: datetime) -> bool:
     another worker (or a same-day restart) already claimed today, so we skip —
     running the daily job twice must not double-discover. Idempotency lives in
     Redis (shared across workers), not in-process state.
+
+    Fail-CLOSED: if Redis itself is unreachable we return False (skip). Claiming
+    blind would risk two schedulers each running a full fleet; a skipped day is
+    recoverable via the next tick / boot catch-up, a duplicate fleet is not.
     """
     key = f"daily_scrape:claimed:{when:%Y-%m-%d}"
     try:
         return bool(await redis_client.set(key, "1", nx=True, ex=48 * 3600))
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"daily claim check failed (proceeding): {e}")
-        return True
+        logger.warning(f"daily claim check failed (skipping run, will retry next tick): {e}")
+        return False
 
 
 async def daily_scrape_scheduler(redis_client, sources: list[str] | None = None, db_pool=None) -> None:
@@ -221,7 +245,7 @@ async def daily_scrape_scheduler(redis_client, sources: list[str] | None = None,
 
     if _CATCHUP_AT_BOOT:
         try:
-            run_id = await _enqueue(redis_client, sources)
+            run_id = await _enqueue(redis_client, await load_enabled_sources(db_pool))
             logger.info(f"Boot catch-up scrape enqueued: {run_id}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Boot catch-up enqueue failed: {e}")
@@ -246,8 +270,9 @@ async def daily_scrape_scheduler(redis_client, sources: list[str] | None = None,
             if not await _claim_day(redis_client, datetime.now(timezone.utc)):
                 logger.info("Daily scrape already claimed today — skipping (idempotent)")
             else:
-                run_id = await _enqueue(redis_client, sources)
-                logger.info(f"Scheduled daily scrape enqueued: {run_id}")
+                enabled = await load_enabled_sources(db_pool)
+                run_id = await _enqueue(redis_client, enabled)
+                logger.info(f"Scheduled daily scrape enqueued: {run_id} (sources={'defaults' if not enabled else f'{len(enabled)} enabled'})")
         except Exception as e:  # noqa: BLE001
             # ponytail: a missed day self-heals next tick; alert path if it matters
             logger.error(f"Daily scheduler enqueue failed: {e}")
@@ -264,3 +289,9 @@ async def daily_scrape_scheduler(redis_client, sources: list[str] | None = None,
             await enforce_retention(db_pool)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"retention sweep failed: {e}")
+        # Operator digest (opt-in via TELEGRAM_* env; no-op off).
+        try:
+            from .utils.ops_digest import maybe_send_daily_digest
+            await maybe_send_daily_digest(redis_client, db_pool)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"daily digest failed: {e}")

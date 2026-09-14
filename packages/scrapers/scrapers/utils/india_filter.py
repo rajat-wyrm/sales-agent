@@ -30,6 +30,9 @@ INDIA_NATIVE_SOURCES = {
     "cutshort", "foundit", "adzuna", "jooble", "indeed", "workday",
     "unstop", "jobinsider", "iimjobs", "timesjobs",
     "apna", "workindia", "hirist", "classicjobs", "hackerearth",
+    "ambitionbox",
+    "freshershunt", "offcampusjobs4u", "job4freshers", "jobbinge",
+    "hasjob", "amazon",
 }
 
 # Strong positive India location signals.
@@ -47,6 +50,15 @@ _INDIA_POSITIVE = [
     "karnataka", "maharashtra", "telangana", "andhra", "gujarat",
     "rajasthan", "uttar pradesh", "madhya pradesh", "kerala",
     "harayana", "haryana", "punjab india", "bihar", "odisha",
+    "assam", "jharkhand", "chhattisgarh", "uttarakhand", "himachal",
+    "arunachal", "meghalaya", "mizoram", "nagaland", "tripura",
+    "sikkim", "manipur", "jammu", "kashmir", "ladakh",
+    "andaman", "nicobar", "puducherry", "pondicherry",
+    "dadra", "nagar haveli", "daman", "diu", "lakshadweep",
+    "vijayawada", "guwahati", "ranchi", "raipur", "madurai",
+    "srinagar", "shimla", "gangtok", "imphal",
+    "shillong", "aizawl", "kohima", "agartala", "itanagar",
+    "delhi ncr",
 ]
 
 # Strong foreign (non-India) location signals.
@@ -132,6 +144,12 @@ _JOB_BOARD_HOSTS = {
     "wellfound.com", "angel.co", "linkedin.com", "akunamatata.live",
     "monster.com", "quikr.com", "jobs.quikr.com", "olx.in", "dice.com",
     "ziprecruiter.com", "careerbuilder.com", "simplyhired.com",
+    # ATS board hosts (the board is never the employer)
+    "greenhouse.io", "boards.greenhouse.io", "lever.co", "ashbyhq.com",
+    "myworkdayjobs.com", "smartrecruiters.com", "recruitee.com", "breezy.hr",
+    "bamboohr.com", "personio.com", "jobs.personio.com", "teamtailor.com",
+    "workable.com", "jobhai.com", "youth4work.com", "ambitionbox.com",
+    "hasjob.co", "amazon.jobs",
 }
 _KNOWN_SUFFIXES = (
     "co.in", "com", "in", "net", "org", "co", "io", "ai", "co.uk",
@@ -167,6 +185,37 @@ def derive_company_domain(company_name: str, job_url: str) -> str:
         if reg and reg not in _JOB_BOARD_HOSTS:
             return reg          # company's own site / ATS board → trustworthy
     # Aggregator host or none → slug the company name (original heuristic,
-    # incl. dropping the Indian corporate suffixes pvt/ltd).
-    slug = re.sub(r"[^a-z0-9]", "", (company_name or "").lower().replace(" pvt", "").replace(" ltd", ""))
+    # incl. dropping the Indian corporate suffixes pvt/ltd/llp/...).
+    name = (company_name or "").lower()
+    for suffix in (
+        " private limited", " pvt ltd", " pvt. ltd.", " pvt", " ltd",
+        " limited", " llp", " inc", " corp",
+    ):
+        name = name.replace(suffix, "")
+    slug = re.sub(r"[^a-z0-9]", "", name)
     return f"{slug}.com" if slug else ""
+
+
+# Corporate trailing tokens stripped for canonical comparison ("Adani Group"
+# vs "Adani"). Lookup-only: display names keep their original form.
+_CANONICAL_STRIP = (
+    " private limited", " pvt ltd", " pvt. ltd.", " pvt", " ltd",
+    " limited", " llp", " inc", " corp", " corporation",
+    " group", " india", " technologies", " technology",
+    " solutions", " services", " systems", " labs", " digital",
+    " consulting", " associates", " enterprises", " industries",
+)
+
+
+def canonical_company_key(name: str) -> str:
+    """Lowercased alphanumeric core of a company name for dedup lookup."""
+    core = (name or "").lower()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _CANONICAL_STRIP:
+            if core.endswith(suffix):
+                core = core[: -len(suffix)]
+                changed = True
+    core = re.sub(r"[^a-z0-9]", "", core)
+    return core

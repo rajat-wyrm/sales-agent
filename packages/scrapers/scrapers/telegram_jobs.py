@@ -18,10 +18,14 @@ from .utils.fresher_classifier import is_fresher_role
 
 logger = logging.getLogger(__name__)
 
-# Public channels/keywords for fresher jobs
+# Public channels/keywords for fresher jobs (roster extended 2026-09-14 with
+# high-volume off-campus handles; exact handles only — no guesses).
 FRESHER_CHANNELS = [
     "fresherjobspol", "jobsindiasite", "sarkari_niyukti",
     "gupy_app", "corporatecareers_in", "campusfresher",
+    "work4freshers", "job4fresherss", "fresherjobinfo",
+    "hrgroupindia1", "freshersarea", "jobsinternshipshub",
+    "Jobs_Careers", "jobsandinternshipsupdates",
 ]
 
 SEARCH_KEYWORDS = ["fresher", "0-1 years", "entry level", "campus hire", "internship"]

@@ -12,8 +12,17 @@ import asyncpg
 import pytest_asyncio
 import redis.asyncio as redis
 
-DB_URL = os.environ.get("DB_URL", "postgresql://postgres:postgres@localhost:5432/leads_db")
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+DB_URL = os.environ.get("DB_URL", "postgresql://postgres:postgres@localhost:5432/leads_db_test")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
+
+# NEVER wipe the shared dev/prod databases. Integration fixtures DROP SCHEMA —
+# running them against leads_db destroyed real data once (2026-09-14). Fail fast.
+_FORBIDDEN_DBS = {"leads_db", "n8n", "postgres"}
+_db_name = (DB_URL.rsplit("/", 1)[-1] or "").split("?")[0]
+assert _db_name not in _FORBIDDEN_DBS, (
+    f"Refusing to run destructive integration tests against database '{_db_name}'. "
+    "Use leads_db_test (default)."
+)
 
 SCHEMA_DIR = os.environ.get(
     "SCHEMA_DIR",

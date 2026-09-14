@@ -16,6 +16,8 @@ from typing import Any
 
 import redis.asyncio as redis
 
+from .queue import requeue_or_dlq, reliable_brpop, ack
+
 logger = logging.getLogger(__name__)
 
 SCRAPER_MAP = {
@@ -34,6 +36,8 @@ SCRAPER_MAP = {
     "recruitee": ("scrapers.recruitee", "RecruiteeScraper"),
     "teamtailor": ("scrapers.teamtailor", "TeamtailorScraper"),
     "breezy": ("scrapers.breezy", "BreezyScraper"),
+    "bamboohr": ("scrapers.bamboohr", "BambooHRScraper"),
+    "personio": ("scrapers.personio", "PersonioScraper"),
     "duckduckgo": ("scrapers.duckduckgo_search", "DuckDuckGoScraper"),
     "reddit": ("scrapers.reddit_jobs", "RedditScraper"),
     "twitter": ("scrapers.twitter_jobs", "TwitterScraper"),
@@ -61,18 +65,23 @@ SCRAPER_MAP = {
     "hirist": ("scrapers.hirist", "HiristScraper"),
     "classicjobs": ("scrapers.classicjobs", "ClassicJobsScraper"),
     "hackerearth": ("scrapers.hackerearth", "HackerEarthScraper"),
+    "ambitionbox": ("scrapers.ambitionbox", "AmbitionBoxScraper"),
+    "offcampus": ("scrapers.offcampus_aggregators", "OffCampusAggregatorsScraper"),
+    "hasjob": ("scrapers.hasjob", "HasjobScraper"),
+    "amazon": ("scrapers.amazon_jobs", "AmazonJobsScraper"),
 }
 DEFAULT_SOURCES = [
     # India-native fresher/entry-level portals (primary target).
     "naukri", "internshala", "freshersworld", "apna", "workindia",
     "shine", "timesjobs", "foundit", "instahyre", "cutshort",
     "unstop", "iimjobs", "jobinsider", "hirist", "classicjobs",
-    "hackerearth",
+    "hackerearth", "ambitionbox", "offcampus", "hasjob",
     # Public ATS career pages (real employer domains; India-filtered downstream,
     # best source of postable HR contacts). Greenhouse/Lever/Workday/Ashby/etc.
     "greenhouse", "lever", "workday", "ashby", "smartrecruiters",
+    "bamboohr", "personio",
     # Discovery accelerators (India-keyed).
-    "indeed", "duckduckgo",
+    "indeed", "duckduckgo", "amazon",
 ]
 
 # Global / US boards kept available but NOT in the India-fresher default set
@@ -123,10 +132,38 @@ async def run_scraper(source: str, redis_client: redis.Redis, db=None, requested
 
         leads = await scraper.scrape_and_enqueue(requested_by=requested_by)
         logger.info(f"Source {source}: scraped and enqueued {leads} leads")
+        if db is not None:
+            # Source health is written HERE (success and failure): nothing else
+            # records per-run health, which is why the table stayed empty.
+            try:
+                await db.execute(
+                    """INSERT INTO source_health
+                         (source_name, consecutive_failures, circuit_open_until, last_success_at, last_failure_reason)
+                       VALUES ($1, 0, NULL, NOW(), NULL)
+                       ON CONFLICT (source_name) DO UPDATE SET
+                         consecutive_failures = 0, circuit_open_until = NULL,
+                         last_success_at = NOW()""",
+                    source,
+                )
+            except Exception as he:  # noqa: BLE001
+                logger.debug(f"source_health success write skipped for {source}: {he}")
         return leads, None
 
     except Exception as e:
         logger.error(f"Source {source} failed: {e}", exc_info=True)
+        if db is not None:
+            try:
+                await db.execute(
+                    """INSERT INTO source_health
+                         (source_name, consecutive_failures, circuit_open_until, last_failure_reason)
+                       VALUES ($1, 1, NULL, $2)
+                       ON CONFLICT (source_name) DO UPDATE SET
+                         consecutive_failures = source_health.consecutive_failures + 1,
+                         last_failure_reason = $2""",
+                    source, str(e)[:500],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return 0, str(e)
 
 
@@ -145,15 +182,16 @@ async def consume_scrape_queue(
     processed = 0
 
     while True:
+        job = None
+        raw_msg: Any = None
         try:
-            raw = await redis_client.brpop("scrape_queue:requests", timeout=10)
-            if raw is None:
+            got = await reliable_brpop(redis_client, "scrape_queue:requests", timeout=10)
+            if got is None:
                 await asyncio.sleep(1)
                 continue
-
-            job = json.loads(raw[1])
+            raw_msg, job = got
             run_id = job.get("run_id", "unknown")
-            sources = resolve_sources(job.get("sources"))
+            sources = resolve_sources(job.get("sources")) or []
             run_type = job.get("run_type", "manual")
             triggered_by = job.get("triggered_by")
 
@@ -166,6 +204,7 @@ async def consume_scrape_queue(
                 "sources_failed": [],
                 "leads_found": 0,
             }
+            per_source_counts: dict[str, int] = {}
 
             async def scrape_source(src: str):
                 db = None
@@ -178,6 +217,7 @@ async def consume_scrape_queue(
                     else:
                         results["sources_succeeded"] += 1
                     results["leads_found"] += count
+                    per_source_counts[src] = count
                 finally:
                     if db and db_pool:
                         await db_pool.release(db)
@@ -209,12 +249,34 @@ async def consume_scrape_queue(
                     )
 
             processed += 1
+            await ack(redis_client, "scrape_queue:requests", raw_msg)
             logger.info(f"Scrape job {run_id} complete: {results}")
+
+            # Wave quality gate (Fallback Corps): on a failed or barren wave,
+            # sibling soldiers compensate with ONE bounded fallback wave.
+            # Compensation jobs (depth>=1) never compensate further: no chains.
+            try:
+                from .army_registry import maybe_fallback_wave
+                sibs = await maybe_fallback_wave(
+                    redis_client, job, sources, results, per_source_counts,
+                )
+                if sibs:
+                    logger.warning(f"Fallback wave queued -> {sibs}")
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Fallback-wave check skipped: {e}")
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in scrape_queue: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "scrape_queue:requests", raw_msg)
         except Exception as e:
             logger.error(f"Consumer error in scrape_queue: {e}", exc_info=True)
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "scrape_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "scrape_queue:requests", job)
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5)
 
     return processed

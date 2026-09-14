@@ -72,6 +72,29 @@ class TestFresherClassifier:
             "New Grad SDE", "", ""
         ) is True
 
+    def test_walk_in_drive(self):
+        assert is_fresher_role("Walk-in Drive Saturday", "", "") is True
+
+    def test_off_campus(self):
+        assert is_fresher_role("Off Campus Hiring", "", "") is True
+
+    def test_apprenticeship(self):
+        assert is_fresher_role("Apprentice Engineer", "", "") is True
+
+    def test_early_career(self):
+        assert is_fresher_role("Early Careers Program", "", "") is True
+
+    def test_year_cohort(self):
+        assert is_fresher_role("Hiring 2026 graduates", "", "") is True
+        assert is_fresher_role("Class of 2025", "", "") is True
+
+    def test_bare_get_not_matched(self):
+        # "GET" alone would match the verb "get" — must NOT fire.
+        assert is_fresher_role("Get Started Here", "", "") is False
+
+    def test_graduate_engineer_trainee(self):
+        assert is_fresher_role("Graduate Engineer Trainee", "", "") is True
+
 
 class TestNormalization:
     """Tests for normalize_lead per SRS §4.4/§4.7."""

@@ -24,7 +24,7 @@ import redis.asyncio as redis
 import asyncpg
 
 from .utils.db import get_db_pool, close_db_pool
-from .queue import dequeue_job, run_queue_consumer, chain_lead
+from .queue import dequeue_job, run_queue_consumer, chain_lead, requeue_or_dlq, reliable_brpop, ack, publish_event
 from .api_utils.scoring_client import recompute_lead_score
 
 from .utils.redact import redact_email
@@ -263,6 +263,23 @@ async def run_osint_enrichment(
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Gravatar lookup skipped: {e}")
 
+    # Tier 2d: RSS hiring-signal corroboration (Agent-Reach channel port,
+    # stdlib-only). Reads the company's OWN press/blog feeds for hiring
+    # announcements. Signals ONLY — never contacts. Corroborates active hiring
+    # for draft grounding and the enrichment provenance log.
+    if domain and domain != ".com":
+        try:
+            from .utils.rss_signals import fetch_company_hiring_signals
+            rss = await fetch_company_hiring_signals(company_name, domain)
+            if rss.get("signals"):
+                result["hiring_signals"] = rss["signals"]
+                logger.info(
+                    f"OSINT: {len(rss['signals'])} RSS hiring signal(s) "
+                    f"for {company_name} ({rss.get('feeds_checked', 0)} feeds)"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"RSS signals skipped for {company_name}@{domain}: {e}")
+
     # Tier 3: holehe check on company emails
     for email in generic_emails:
         try:
@@ -349,8 +366,9 @@ async def process_enrichment_job(
     async with db_pool.acquire() as conn:
         lead = await conn.fetchrow(
             """
-            SELECT l.id, l.hr_contact_id, l.pipeline_stage,
+            SELECT l.id, l.hr_contact_id, l.pipeline_stage, l.company_id,
                    hc.full_name, hc.linkedin_url, hc.personal_email, hc.personal_mobile,
+                   hc.current_company_id as contact_company_id,
                    c.name as company_name, c.domain
             FROM leads l
             JOIN companies c ON l.company_id = c.id
@@ -430,6 +448,7 @@ async def process_enrichment_job(
 
         # Step 1: ContactOut API — only when the cascade found nothing usable AND
         # a LinkedIn URL is on file (it keys off the profile) AND a key exists.
+        contactout_key_missing = False
         if (
             not enrichment_result or not enrichment_result.get("hr_email")
         ) and provider in ("contactout", "auto"):
@@ -439,6 +458,8 @@ async def process_enrichment_job(
                 or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
                 or os.environ.get("ACCONTOUT_API_KEY")
             )
+            if provider == "contactout" and not contactout_key:
+                contactout_key_missing = True
             if contactout_key and hr_linkedin:
                 result = await call_contactout(hr_linkedin, contactout_key)
                 if result:
@@ -448,11 +469,14 @@ async def process_enrichment_job(
                     status = "success"
 
         # Step 2: Snov.io API — final paid fallback if still no email.
+        snovio_key_missing = False
         if (
             not enrichment_result or not enrichment_result.get("hr_email")
         ) and provider in ("snovio", "auto"):
             snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
             snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
+            if provider == "snovio" and not snovio_key:
+                snovio_key_missing = True
             if snovio_key and hr_name and company_name:
                 result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
                 if result:
@@ -485,7 +509,33 @@ async def process_enrichment_job(
             not enrichment_result.get("hr_email")
             and not enrichment_result.get("hr_linkedin_url")
         ):
-            status = "no_match"
+            # Explicit per-row provider choice must be recorded honestly: the
+            # operator chose X and X produced nothing (missing key vs API miss
+            # distinguished so the UI can say "configure a key" vs "no match").
+            if provider not in ("auto", "osint", "osint_fallback"):
+                used_provider = provider
+                key_missing = (
+                    (provider == "contactout" and contactout_key_missing)
+                    or (provider == "snovio" and snovio_key_missing)
+                    or (
+                        provider not in ("contactout", "snovio")
+                        and not api_keys.get(provider)
+                        and not any(
+                            os.environ.get(e) for e in {
+                                "hunter": ["HUNTER_API_KEY"],
+                                "apollo": ["APOLLO_API_KEY"],
+                                "apollo_io": ["APOLLO_API_KEY"],
+                                "lusha": ["LUSHA_API_KEY"],
+                                "rocketreach": ["ROCKETREACH_API_KEY"],
+                                "prospeo": ["PROSPEO_API_KEY"],
+                                "findymail": ["FINDYMAIL_API_KEY"],
+                            }.get(provider, [])
+                        )
+                    )
+                )
+                status = "provider_not_configured" if key_missing else "no_match"
+            else:
+                status = "no_match"
 
         # Update enrichment_log
         await conn.execute(
@@ -512,8 +562,14 @@ async def process_enrichment_job(
             confidence = enrichment_result.get("confidence_score", 0)
 
             if new_hr_name or new_hr_linkedin or new_hr_email or new_hr_mobile:
-                # Create or update HR contact
-                if lead["hr_contact_id"]:
+                # Create or update HR contact.
+                #
+                # Only trust the lead's existing link when it actually belongs to
+                # this lead's company. Legacy rows carry a contact that was matched
+                # globally (a recruiter from an unrelated employer); updating that
+                # row would overwrite a real person's details with someone else's,
+                # so re-point the lead at a correctly-scoped contact instead.
+                if lead["hr_contact_id"] and lead["contact_company_id"] == lead["company_id"]:
                     await conn.execute(
                         """
                         UPDATE hr_contacts
@@ -521,15 +577,15 @@ async def process_enrichment_job(
                             linkedin_url = CASE
                                 WHEN linkedin_url IS NULL OR linkedin_url = ''
                                      OR $5 > confidence_score
-                                THEN COALESCE($2, linkedin_url) ELSE linkedin_url END,
+                                THEN COALESCE(NULLIF($2, ''), linkedin_url) ELSE linkedin_url END,
                             personal_email = CASE
                                 WHEN personal_email IS NULL OR personal_email = ''
                                      OR $5 > confidence_score
-                                THEN COALESCE($3, personal_email) ELSE personal_email END,
+                                THEN COALESCE(NULLIF($3, ''), personal_email) ELSE personal_email END,
                             personal_mobile = CASE
                                 WHEN personal_mobile IS NULL OR personal_mobile = ''
                                      OR $5 > confidence_score
-                                THEN COALESCE($4, personal_mobile) ELSE personal_mobile END,
+                                THEN COALESCE(NULLIF($4, ''), personal_mobile) ELSE personal_mobile END,
                             confidence_score = GREATEST(confidence_score, $5),
                             updated_at = NOW()
                         WHERE id = $6
@@ -547,7 +603,7 @@ async def process_enrichment_job(
                         INSERT INTO hr_contacts
                           (full_name, linkedin_url, personal_email, personal_mobile,
                            current_company_id, confidence_score)
-                        VALUES ($1, $2, $3, $4, $5, $6)
+                        VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $6)
                         RETURNING id
                         """,
                         new_hr_name or None,
@@ -584,16 +640,13 @@ async def process_enrichment_job(
     await recompute_lead_score(db_pool, lead_id)
 
     # Publish SSE event
-    await redis_client.publish(
-        f"user:{requested_by}:sse",
-        json.dumps({
-            "type": "enrichment_complete",
-            "lead_id": str(lead_id),
-            "provider": used_provider,
-            "status": status,
-            "timestamp": asyncio.get_event_loop().time(),
-        }, default=str),
-    )
+    await publish_event(redis_client, requested_by, {
+        "type": "enrichment_complete",
+        "lead_id": str(lead_id),
+        "provider": used_provider,
+        "status": status,
+        "timestamp": asyncio.get_event_loop().time(),
+    })
 
     logger.info(f"Enrichment complete for lead {lead_id}: provider={used_provider}, status={status}")
 
@@ -623,19 +676,30 @@ async def consume_enrichment_queue(
 
     processed = 0
     while True:
+        payload: Any = None
+        raw_msg: Any = None
         try:
-            result = await redis_client.brpop("enrichment_queue:requests", timeout=30)
-            if result is None:
+            got = await reliable_brpop(redis_client, "enrichment_queue:requests", timeout=30)
+            if got is None:
                 await asyncio.sleep(1)
                 continue
 
-            payload = json.loads(result[1])
+            raw_msg, payload = got
             await handle_enrichment_job(payload, redis_client, db_pool)
+            await ack(redis_client, "enrichment_queue:requests", raw_msg)
             processed += 1
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in enrichment_queue: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "enrichment_queue:requests", raw_msg)
         except Exception as e:
             logger.error(f"Enrichment consumer error: {e}", exc_info=True)
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "enrichment_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "enrichment_queue:requests", payload)
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5)
 
     return processed

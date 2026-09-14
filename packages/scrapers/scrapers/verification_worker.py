@@ -25,7 +25,7 @@ import asyncpg
 
 from .utils.db import get_db_pool
 from .api_utils.scoring_client import recompute_lead_score
-from .queue import chain_lead
+from .queue import chain_lead, requeue_or_dlq, reliable_brpop, ack, publish_event
 
 from .utils.redact import redact_email, redact_phone
 
@@ -211,16 +211,13 @@ async def process_verification_job(
 
     await recompute_lead_score(db_pool, lead_id)
 
-    await redis_client.publish(
-        f"user:{requested_by}:sse",
-        json.dumps({
-            "type": "verification_complete",
-            "lead_id": str(lead_id),
-            "email_status": email_status,
-            "whatsapp_status": whatsapp_status,
-            "timestamp": asyncio.get_event_loop().time(),
-        }, default=str),
-    )
+    await publish_event(redis_client, requested_by, {
+        "type": "verification_complete",
+        "lead_id": str(lead_id),
+        "email_status": email_status,
+        "whatsapp_status": whatsapp_status,
+        "timestamp": asyncio.get_event_loop().time(),
+    })
 
     logger.info(f"Verification complete for lead {lead_id}: email={email_status}, whatsapp={whatsapp_status}")
 
@@ -242,19 +239,30 @@ async def consume_verification_queue(
 
     processed = 0
     while True:
+        payload: Any = None
+        raw_msg: Any = None
         try:
-            result = await redis_client.brpop("verification_queue:requests", timeout=30)
-            if result is None:
+            got = await reliable_brpop(redis_client, "verification_queue:requests", timeout=30)
+            if got is None:
                 await asyncio.sleep(1)
                 continue
 
-            payload = json.loads(result[1])
+            raw_msg, payload = got
             await process_verification_job(payload, redis_client, db_pool)
+            await ack(redis_client, "verification_queue:requests", raw_msg)
             processed += 1
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in verification_queue: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "verification_queue:requests", raw_msg)
         except Exception as e:
             logger.error(f"Verification consumer error: {e}", exc_info=True)
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "verification_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "verification_queue:requests", payload)
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5)
 
     return processed

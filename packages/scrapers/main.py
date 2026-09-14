@@ -11,6 +11,8 @@ import uuid
 from scrapers.utils.redis import get_redis
 from scrapers.utils.db import get_db_pool
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="HireGen Scraper Fleet API",
     description="Python worker service for scraping, enrichment, verification, and AI drafting",
@@ -129,12 +131,21 @@ async def army_run(req: ScrapeRequest):
     """
     redis_client = get_redis()
     run_id = str(uuid.uuid4())
+    sources = req.sources
+    if not sources:
+        # No explicit list: honor the Settings source toggles (None = all).
+        try:
+            from scrapers.scheduler import load_enabled_sources
+            sources = await load_enabled_sources(_db_pool)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"source toggles unreadable, using defaults: {e}")
+            sources = None
     await redis_client.lpush(
         "scrape_queue:requests",
         json.dumps({
             "run_id": run_id,
             "run_type": "manual",
-            "sources": req.sources,
+            "sources": sources,
             "triggered_by": req.triggered_by,
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         }),
@@ -185,6 +196,23 @@ async def start_consumers():
 
     tasks = []
     if redis_client:
+        # Crash recovery first: jobs stranded in :processing lists (worker died
+        # between pop and ack) go back to their queues before consumers start.
+        try:
+            from scrapers.queue import reclaim_processing, dlq_depth
+            reclaimed = await reclaim_processing(redis_client, [
+                "scrape_queue:requests", "raw_leads_queue:requests",
+                "enrichment_queue:requests", "verification_queue:requests",
+                "draft_queue:requests", "send_queue:requests",
+                "verify_send_queue:requests",
+            ])
+            total_dlq = 0
+            for qn in list(reclaimed):
+                total_dlq += await dlq_depth(redis_client, qn)
+            logger = logging.getLogger(__name__)
+            logger.info(f"Boot reclaim: {reclaimed} (DLQ depth total: {total_dlq})")
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(f"Boot reclaim failed (queues still consumable): {e}")
         tasks.append(asyncio.create_task(consume_scrape_queue(redis_client, db_pool)))
         tasks.append(asyncio.create_task(run_normalizer(redis_client, db_pool)))
         # daily full-fleet heartbeat (India jobs -> enrich -> verify -> draft -> send)

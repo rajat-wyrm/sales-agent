@@ -144,7 +144,6 @@ def normalize_mobile_e164(raw: str) -> str:
     if len(digits) == 10 and digits[0] in "6789":
         return f"+91{digits}"
     return ""                            # not a valid Indian mobile
-    return f"+91{digits}"
 
 
 def is_valid_email_format(email: str) -> bool:

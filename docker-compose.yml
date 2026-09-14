@@ -1,5 +1,4 @@
-version: '3.8'
-
+# (removed obsolete `version` key: compose v2 warns on it every invocation)
 services:
   postgres:
     image: postgres:16-alpine
@@ -32,6 +31,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: sales-agent-redis
+    # Durability (Track 1): AOF everysec + named volume, so queued jobs, DLQs,
+    # circuit-breaker state and daily-claim keys survive restarts (RPO <= 1s).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -119,4 +123,5 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   n8n-data:

@@ -24,6 +24,7 @@ import asyncpg
 
 from .base import BaseScraper, ScraperError, now_iso
 from .utils.db import get_db_pool
+from .queue import requeue_or_dlq, reliable_brpop, ack, publish_event
 from .api_utils.scoring_client import recompute_lead_score
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ DRAFT_PROMPT_TEMPLATE = (_PROMPTS_DIR / "draft_prompt.txt").read_text(encoding="
 
 EMAIL_TEMPLATE = subject_template = """Hi {hr_name_or_title},
 
-I noticed {company_name} is hiring for a {job_title} role. 
+I noticed {company_name} is hiring for a {job_title} role{experience_clause}.
 
 At HireGen, we help companies like yours find top fresher talent — candidates who are ready to contribute from day one. Our platform connects you with pre-verified entry-level candidates who match your exact requirements.
 
@@ -72,12 +73,15 @@ def generate_template_draft(lead_data: dict[str, Any]) -> dict[str, Any]:
     salary_range = lead_data.get("salary_range", "") or ""
     job_url = lead_data.get("job_url", "") or ""
 
-    hr_display = hr_name if hr_name else "Team"
+    hr_display = hr_name if hr_name else "Hiring Team"
+    exp = (lead_data.get("experience_level", "") or "").strip()
+    experience_clause = f" ({exp})" if exp else ""
 
     email_body = EMAIL_TEMPLATE.format(
         hr_name_or_title=hr_display,
         company_name=company_name,
         job_title=job_title,
+        experience_clause=experience_clause,
         job_url=job_url if job_url else "N/A",
     )
 
@@ -111,6 +115,7 @@ async def generate_gemini_drafts(
         prompt = DRAFT_PROMPT_TEMPLATE.format(**{
             "company_name": lead_data.get("company_name", "") or "",
             "job_title": lead_data.get("job_title", "") or "",
+            "experience_level": lead_data.get("experience_level", "") or "",
             "about_company": lead_data.get("about_company", "") or "",
             "about_job": lead_data.get("about_job", "") or "",
             "hr_name": lead_data.get("hr_name", "") or "",
@@ -165,7 +170,7 @@ async def process_draft_job(
             SELECT l.id, l.hr_contact_id, l.pipeline_stage,
                    c.name as company_name, c.about as about_company, c.default_email,
                    jp.title as job_title, jp.description as about_job,
-                   jp.salary_range, jp.job_url, jp.source_site,
+                   jp.experience_level, jp.salary_range, jp.job_url, jp.source_site,
                    hc.full_name as hr_name, hc.linkedin_url
             FROM leads l
             JOIN companies c ON l.company_id = c.id
@@ -186,6 +191,7 @@ async def process_draft_job(
             "job_title": lead["job_title"],
             "about_job": lead["about_job"] or "",
             "hr_name": lead["hr_name"] or "",
+            "experience_level": lead["experience_level"] or "",
             "salary_range": lead["salary_range"] or "",
             "job_url": lead["job_url"] or "",
             "source_site": lead["source_site"] or "",
@@ -260,16 +266,13 @@ async def process_draft_job(
 
     await recompute_lead_score(db_pool, lead_id)
 
-    await redis_client.publish(
-        f"user:{requested_by}:sse",
-        json.dumps({
-            "type": "draft_generated",
-            "lead_id": str(lead_id),
-            "generated_by": generated_by,
-            "channels": [ch for ch, _ in channels_to_create],
-            "timestamp": asyncio.get_event_loop().time(),
-        }, default=str),
-    )
+    await publish_event(redis_client, requested_by, {
+        "type": "draft_generated",
+        "lead_id": str(lead_id),
+        "generated_by": generated_by,
+        "channels": [ch for ch, _ in channels_to_create],
+        "timestamp": asyncio.get_event_loop().time(),
+    })
 
     logger.info(f"Draft generation complete for lead {lead_id}: {generated_by}")
 
@@ -284,19 +287,30 @@ async def consume_draft_queue(
 
     processed = 0
     while True:
+        payload: Any = None
+        raw_msg: Any = None
         try:
-            result = await redis_client.brpop("draft_queue:requests", timeout=30)
-            if result is None:
+            got = await reliable_brpop(redis_client, "draft_queue:requests", timeout=30)
+            if got is None:
                 await asyncio.sleep(1)
                 continue
 
-            payload = json.loads(result[1])
+            raw_msg, payload = got
             await process_draft_job(payload, redis_client, db_pool)
+            await ack(redis_client, "draft_queue:requests", raw_msg)
             processed += 1
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in draft_queue: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "draft_queue:requests", raw_msg)
         except Exception as e:
             logger.error(f"Draft consumer error: {e}", exc_info=True)
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "draft_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "draft_queue:requests", payload)
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5)
 
     return processed

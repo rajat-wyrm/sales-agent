@@ -87,6 +87,36 @@ async def _fetch_snippets(query: str) -> list[str]:
     return [s for group in results for s in group]
 
 
+def _google_cse_configured() -> bool:
+    """Google Custom Search is key-gated (GOOGLE_CSE_KEY + GOOGLE_CSE_CX):
+    tried only when the operator configured it, after the free engines."""
+    import os
+    return bool(os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))
+
+
+async def _fetch_snippets_cse(query: str) -> list[str]:
+    """Google CSE snippets (key-gated). Returns [] when unconfigured or on
+    any error — the free tier above is the default path, never this."""
+    import os
+    key, cx = os.environ.get("GOOGLE_CSE_KEY"), os.environ.get("GOOGLE_CSE_CX")
+    if not key or not cx:
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={"key": key, "cx": cx, "q": query, "num": 10},
+            )
+            if r.status_code != 200:
+                return []
+            items = (r.json().get("items") or [])
+            return [f"{it.get('title', '')} {it.get('snippet', '')}" for it in items]
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"serp google-cse failed: {e}")
+        return []
+
+
 def _name_in_text(name: str, text: str) -> bool:
     toks = [t for t in _NAME_TOKEN.findall((name or "").lower()) if len(t) > 1]
     if not toks:
@@ -153,6 +183,13 @@ async def dork_find_email(name: str, company: str, domain: str) -> dict[str, Any
     for q in queries:
         try:
             snippets = await _fetch_snippets(q)
+            # Key-gated Google CSE runs LAST, only when configured — same
+            # corroboration rules apply to its snippets.
+            if _google_cse_configured():
+                try:
+                    snippets = snippets + await _fetch_snippets_cse(q)
+                except Exception:
+                    pass
         except Exception:
             continue
         for sn in snippets:

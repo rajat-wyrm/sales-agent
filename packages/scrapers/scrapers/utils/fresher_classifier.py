@@ -2,14 +2,27 @@
 import re
 
 FRESHER_KEYWORDS = [
-    "fresher", "0-1 years", "0-1yr", "0-2 years", "0-2yr",
+    "fresher", "0-1 years", "0-1yr", "0-2 years", "0-2yr", "0-3 years", "0-3yr",
     "no experience", "no-experience", "entry level", "entry-level",
-    "graduate trainee", "campus hire", "0 years",
+    "graduate trainee", "graduate engineer trainee", "campus hire", "0 years",
     "management trainee", "trainee",
     "intern", "internship", "new grad", "new-grad",
+    "early career", "early careers",
+    "walk-in", "walk in", "walk-in drive",
+    "off-campus", "off campus",
+    "apprentice", "apprenticeship",
+    "any graduate", "final year",
+    "passout", "pass-out",
     # India fresher-hiring idiom: "junior"/"graduate" (e.g. "BE graduate",
     # "Junior Developer") denote entry level within this product's fresher scope.
     "junior", "graduate", "undergraduate", "freshers",
+]
+
+# Year-cohort phrases ("2026 graduate", "class of 2025") — keyword list can't
+# enumerate every year, so one anchored regex covers them.
+FRESHER_REGEXES = [
+    r"\b20\d\d\s+graduates?\b",
+    r"\bclass of 20\d\d\b",
 ]
 
 
@@ -27,5 +40,8 @@ def is_fresher_role(title: str, experience: str = "", full_text: str = "") -> bo
     for kw in FRESHER_KEYWORDS:
         pattern = rf'\b{re.escape(kw)}\b'
         if re.search(pattern, combined):
+            return True
+    for rx in FRESHER_REGEXES:
+        if re.search(rx, combined):
             return True
     return False

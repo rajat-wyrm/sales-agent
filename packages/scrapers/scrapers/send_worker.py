@@ -22,6 +22,7 @@ import redis.asyncio as redis
 import asyncpg
 
 from .utils.db import get_db_pool
+from .queue import requeue_or_dlq, reliable_brpop, ack, publish_event
 from .api_utils.scoring_client import recompute_lead_score
 
 from .utils.redact import redact_email, redact_phone
@@ -98,8 +99,55 @@ async def _is_suppressed(conn, normalized_contact: str, channel: str) -> bool:
     return bool(n)
 
 
+def email_domain(address: str | None) -> str:
+    """Recipient domain, lowercased. Empty string when unparseable."""
+    parts = (address or "").strip().lower().split("@")
+    return parts[1] if len(parts) == 2 and parts[1] else ""
+
+
+async def domain_sent_count(conn, domain: str, hours: int = 24) -> int:
+    """Emails already sent to this recipient domain in the window."""
+    if not domain:
+        return 0
+    n = await conn.fetchval(
+        """
+        SELECT count(*) FROM outreach_log ol
+          JOIN leads l ON ol.lead_id = l.id
+          LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+          LEFT JOIN companies c ON l.company_id = c.id
+         WHERE ol.channel = 'email' AND ol.delivery_status = 'sent'
+           AND ol.sent_at > NOW() - make_interval(hours => $1)
+           AND lower(split_part(coalesce(hc.personal_email, c.default_email, ''), '@', 2)) = $2
+        """,
+        hours, domain,
+    )
+    return int(n or 0)
+
+
+def resend_headers(resend_key: str, idempotency_key: str | None = None) -> dict[str, str]:
+    """Auth (+ replay protection) headers for Resend.
+
+    The idempotency key makes a crash between provider-accept and our
+    outreach_log commit safe: replaying the same job reuses the key and the
+    provider dedupes instead of sending twice. Key scope is one
+    (lead, draft, channel, day) — the 24h send cooldown owns longer windows.
+    """
+    headers = {"Authorization": f"Bearer {resend_key}"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key[:255]
+    return headers
+
+
+def send_idempotency_key(lead_id: str, draft_id: str | None, channel: str, day: str | None = None) -> str:
+    """Deterministic replay key for one send job (pure — unit-testable)."""
+    import datetime as _dt
+    day = day or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    return f"hiregen-{lead_id}-{draft_id or 'live'}-{channel}-{day}"
+
+
 async def send_email(
-    email: str, subject: str, body: str, api_key: str, from_email: str
+    email: str, subject: str, body: str, api_key: str, from_email: str,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Send email via Resend or Brevo API."""
     # Try Resend first
@@ -114,7 +162,7 @@ async def send_email(
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     "https://api.resend.email/v1/emails/send",
-                    headers={"Authorization": f"Bearer {resend_key}"},
+                    headers=resend_headers(resend_key, idempotency_key),
                     json={
                         "from": from_email,
                         "to": [email],
@@ -220,15 +268,12 @@ async def process_send_job(
         )
         if do_not_contact:
             logger.warning(f"Send blocked: lead {lead_id} is do_not_contact")
-            await redis_client.publish(
-                f"user:{requested_by}:sse",
-                json.dumps({
-                    "type": "send_blocked",
-                    "lead_id": str(lead_id),
-                    "reason": "do_not_contact",
-                    "timestamp": asyncio.get_event_loop().time(),
-                }, default=str),
-            )
+            await publish_event(redis_client, requested_by, {
+                "type": "send_blocked",
+                "lead_id": str(lead_id),
+                "reason": "do_not_contact",
+                "timestamp": asyncio.get_event_loop().time(),
+            })
             return
 
         # Get lead details
@@ -269,12 +314,9 @@ async def process_send_job(
             )
             if recent:
                 logger.warning(f"Send blocked: lead {lead_id} reached in last {cooldown_h}h (dedup)")
-                await redis_client.publish(
-                    f"user:{requested_by}:sse",
-                    json.dumps({"type": "send_blocked", "lead_id": str(lead_id),
-                                "reason": "cooldown", "timestamp": asyncio.get_event_loop().time()},
-                               default=str),
-                )
+                await publish_event(redis_client, requested_by,
+                    {"type": "send_blocked", "lead_id": str(lead_id),
+                     "reason": "cooldown", "timestamp": asyncio.get_event_loop().time()})
                 return
 
         # Load user-supplied API keys
@@ -314,7 +356,7 @@ async def process_send_job(
 
         # Send email
         if channel in ("email", "both"):
-            if lead["email_status"] != "valid" and channel == "email":
+            if lead["email_status"] != "valid":
                 logger.warning(f"Email send blocked: lead {lead_id} email not verified")
                 results.append({"channel": "email", "status": "blocked", "reason": "email not verified"})
             else:
@@ -325,27 +367,35 @@ async def process_send_job(
                     logger.warning(f"Email send blocked: {redact_email(email)} is suppressed/opted-out")
                     results.append({"channel": "email", "status": "blocked", "reason": "suppressed"})
                 else:
-                    subject = draft["subject"] if draft else f"Opportunity at {lead_id}"
-                    body = (draft["body"] if draft else "") + await build_unsubscribe_footer(conn, email)
-                    result = await send_email(email, subject, body, email_api_key or "", from_email)
-                    results.append({"channel": "email", **result})
+                    domain_cap = int(os.environ.get("SEND_MAX_PER_DOMAIN_PER_DAY", "25") or 25)
+                    domain = email_domain(email)
+                    over_cap = domain_cap > 0 and await domain_sent_count(conn, domain) >= domain_cap
+                    if over_cap:
+                        logger.warning(f"Email send blocked: domain {domain} hit daily cap ({domain_cap})")
+                        results.append({"channel": "email", "status": "blocked", "reason": "domain_cap"})
+                    else:
+                        subject = draft["subject"] if draft else f"Opportunity at {lead_id}"
+                        body = (draft["body"] if draft else "") + await build_unsubscribe_footer(conn, email)
+                        result = await send_email(email, subject, body, email_api_key or "", from_email,
+                                                  send_idempotency_key(str(lead_id), draft_id, "email"))
+                        results.append({"channel": "email", **result})
 
-                    # Log to outreach_log
-                    await conn.execute(
-                        """
-                        INSERT INTO outreach_log (lead_id, draft_id, channel, sent_by, provider_message_id, delivery_status)
-                        VALUES ($1, $2, 'email', $3, $4, $5)
-                        """,
-                        lead_id,
-                        draft_id if draft_id else None,
-                        user_id,
-                        result.get("provider_message_id"),
-                        result["status"],
-                    )
+                        # Log to outreach_log
+                        await conn.execute(
+                            """
+                            INSERT INTO outreach_log (lead_id, draft_id, channel, sent_by, provider_message_id, delivery_status)
+                            VALUES ($1, $2, 'email', $3, $4, $5)
+                            """,
+                            lead_id,
+                            draft_id if draft_id else None,
+                            user_id,
+                            result.get("provider_message_id"),
+                            result["status"],
+                        )
 
         # Send WhatsApp
         if channel in ("whatsapp", "both"):
-            if lead["whatsapp_status"] != "registered" and channel == "whatsapp":
+            if lead["whatsapp_status"] != "registered":
                 logger.warning(f"WhatsApp send blocked: lead {lead_id} WhatsApp not verified")
                 results.append({"channel": "whatsapp", "status": "blocked", "reason": "whatsapp not verified"})
             else:
@@ -382,15 +432,12 @@ async def process_send_job(
 
     await recompute_lead_score(db_pool, lead_id)
 
-    await redis_client.publish(
-        f"user:{requested_by}:sse",
-        json.dumps({
-            "type": "send_complete",
-            "lead_id": str(lead_id),
-            "results": results,
-            "timestamp": asyncio.get_event_loop().time(),
-        }, default=str),
-    )
+    await publish_event(redis_client, requested_by, {
+        "type": "send_complete",
+        "lead_id": str(lead_id),
+        "results": results,
+        "timestamp": asyncio.get_event_loop().time(),
+    })
 
     logger.info(f"Send complete for lead {lead_id}: {results}")
 
@@ -405,19 +452,30 @@ async def consume_send_queue(
 
     processed = 0
     while True:
+        payload: Any = None
+        raw_msg: Any = None
         try:
-            result = await redis_client.brpop("send_queue:requests", timeout=30)
-            if result is None:
+            got = await reliable_brpop(redis_client, "send_queue:requests", timeout=30)
+            if got is None:
                 await asyncio.sleep(1)
                 continue
 
-            payload = json.loads(result[1])
+            raw_msg, payload = got
             await process_send_job(payload, redis_client, db_pool)
+            await ack(redis_client, "send_queue:requests", raw_msg)
             processed += 1
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in send_queue: {e}")
+            if raw_msg is not None:
+                await ack(redis_client, "send_queue:requests", raw_msg)
         except Exception as e:
             logger.error(f"Send consumer error: {e}", exc_info=True)
+            try:
+                if raw_msg is not None:
+                    await ack(redis_client, "send_queue:requests", raw_msg)
+                await requeue_or_dlq(redis_client, "send_queue:requests", payload)
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5)
 
     return processed
