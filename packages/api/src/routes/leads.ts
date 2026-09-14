@@ -16,7 +16,10 @@ const paginationSchema = z.object({
   sort_order: z.enum(['asc', 'desc']).default('desc'),
   score_band: z.enum(['hot', 'warm', 'cold']).optional(),
   pipeline_stage: z
-    .enum(['discovered', 'enriched', 'verified', 'drafted', 'contacted', 'replied', 'bounced'])
+    .enum(['discovered', 'enriching', 'enriched', 'verifying', 'verified', 'drafted', 'contacted',
+      'ready_for_outreach', 'message_generated', 'send_pending', 'sent', 'delivered', 'replied',
+      'converted', 'bounced', 'enrichment_failed', 'verification_failed', 'contact_unavailable',
+      'suppressed', 'send_failed', 'provider_error', 'retry_pending'])
     .optional(),
   source_site: z.string().optional(),
   date_from: z.string().optional(),
@@ -183,10 +186,11 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
           l.*,
           c.name as company_name, c.domain, c.about as about_company,
           c.industry, c.size_estimate, c.default_email, c.default_phone, c.website_url,
-          hc.full_name as hr_name, hc.linkedin_url, hc.personal_email,
-          hc.personal_mobile, hc.confidence_score as hr_confidence,
+          hc.full_name as hr_name,
+          hc.linkedin_url as hr_linkedin_url, hc.personal_email as hr_email,
+          hc.personal_mobile as hr_mobile, hc.confidence_score as hr_confidence,
           jp.title as job_title, jp.description as job_description,
-          jp.experience_level, jp.salary_range, jp.job_url
+          jp.experience_level, jp.salary_range, jp.job_url, jp.source_site
         FROM leads l
         JOIN companies c ON l.company_id = c.id
         LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
@@ -499,14 +503,17 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
 
       const sql = getDB();
       const lead = await sql.unsafe(
-        `SELECT email_status, whatsapp_status, do_not_contact FROM leads WHERE id = $1`,
+        `SELECT l.email_status, l.whatsapp_status, l.do_not_contact,
+                hc.personal_email AS hr_email, hc.personal_mobile AS hr_mobile
+         FROM leads l LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+         WHERE l.id = $1`,
         [id],
       );
 
       if (!lead || lead.length === 0) {
         return reply.status(404).send({ error: 'Lead not found' });
       }
-      const leadRow = lead[0] as unknown as { email_status: string | null; whatsapp_status: string | null; do_not_contact: boolean } | null;
+      const leadRow = lead[0] as unknown as { email_status: string | null; whatsapp_status: string | null; do_not_contact: boolean; hr_email: string | null; hr_mobile: string | null } | null;
       if (!leadRow) {
         return reply.status(404).send({ error: 'Lead not found' });
       }
@@ -523,6 +530,29 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
           error: 'Cannot send to do-not-contact lead',
           detail: 'This lead is flagged do_not_contact (bounced or opted out).',
         });
+      }
+
+      // Server-side suppression check (never rely on frontend or flag sync alone).
+      const contactsToCheck = [leadRow.hr_email?.toLowerCase().trim(), leadRow.hr_mobile?.toLowerCase().trim()].filter(Boolean) as string[];
+      if (contactsToCheck.length > 0) {
+        const suppressed = await sql.unsafe(
+          `SELECT 1 FROM suppressions WHERE normalized_contact = ANY($1::text[])
+             OR (channel = 'any' AND normalized_contact = ANY($1::text[])) LIMIT 1`,
+          [contactsToCheck],
+        );
+        if (suppressed && suppressed.length > 0) {
+          await logAuditEvent({
+            user_id: (req.user as { id: string }).id,
+            action: 'send_blocked_suppressed',
+            resource_type: 'lead',
+            resource_id: id,
+            details: { reason: 'Contact found in suppressions blocklist' },
+          });
+          return reply.status(403).send({
+            error: 'Cannot send to suppressed contact',
+            detail: 'This contact is on the do-not-contact / suppression list.',
+          });
+        }
       }
 
       if (channel === 'email' || channel === 'both') {
@@ -598,6 +628,31 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const { channel, draft_id } = parseResult.data;
 
+      // Fail fast on suppressed/unverified leads instead of queueing work that
+      // the worker would only reject later. Worker re-checks server-side too.
+      const sql = getDB();
+      const preLead = await sql.unsafe(
+        `SELECT l.email_status, l.whatsapp_status, l.do_not_contact,
+                hc.personal_email AS hr_email, hc.personal_mobile AS hr_mobile
+         FROM leads l LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+         WHERE l.id = $1`,
+        [id],
+      );
+      const pre = preLead?.[0] as unknown as { email_status: string | null; whatsapp_status: string | null; do_not_contact: boolean; hr_email: string | null; hr_mobile: string | null } | undefined;
+      if (!pre) return reply.status(404).send({ error: 'Lead not found' });
+      if (pre.do_not_contact) {
+        await logAuditEvent({ user_id: (req.user as { id: string }).id, action: 'send_blocked_do_not_contact', resource_type: 'lead', resource_id: id, details: { flow: 'verify-and-send' } });
+        return reply.status(403).send({ error: 'Cannot send to do-not-contact lead' });
+      }
+      const preContacts = [pre.hr_email?.toLowerCase().trim(), pre.hr_mobile?.toLowerCase().trim()].filter(Boolean) as string[];
+      if (preContacts.length > 0) {
+        const hit = await sql.unsafe(`SELECT 1 FROM suppressions WHERE normalized_contact = ANY($1::text[]) LIMIT 1`, [preContacts]);
+        if (hit && hit.length > 0) {
+          await logAuditEvent({ user_id: (req.user as { id: string }).id, action: 'send_blocked_suppressed', resource_type: 'lead', resource_id: id, details: { flow: 'verify-and-send' } });
+          return reply.status(403).send({ error: 'Cannot send to suppressed contact' });
+        }
+      }
+
       const redis = getRedis();
       const jobId = await redis.lpush(
         'verify_send_queue:requests',
@@ -638,6 +693,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
 
   fastify.get<{ Params: { id: string } }>(
     '/:id/timeline',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
     async (req, reply) => {
       const idResult = leadIdSchema.safeParse(req.params);
       if (!idResult.success) {

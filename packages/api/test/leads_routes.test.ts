@@ -148,19 +148,88 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
     );
   });
 
-  test('draft endpoint enqueues job for draft queue', async () => {
-    mockSqlUnsafe.mockResolvedValue([]);
+  test('verify-and-send to do_not_contact lead returns 403 without queueing', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('FROM leads l LEFT JOIN hr_contacts')) {
+        return [{ do_not_contact: true, email_status: 'valid', whatsapp_status: 'registered', hr_email: 'a@x.com', hr_mobile: null }];
+      }
+      return [];
+    });
 
     const response = await app.inject({
       method: 'POST',
-      url: '/leads/550e8400-e29b-41d4-a716-446655440000/draft',
-      payload: { channel: 'both' },
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/verify-and-send',
+      payload: { channel: 'email' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mockRedisLpush).not.toHaveBeenCalled();
+  });
+
+  test('verify-and-send to suppressed contact returns 403 without queueing', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('FROM suppressions')) {
+        return [{ '1': 1 }];
+      }
+      if (query.includes('FROM leads l LEFT JOIN hr_contacts')) {
+        return [{ do_not_contact: false, email_status: 'valid', whatsapp_status: 'registered', hr_email: 'optout@x.com', hr_mobile: null }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/verify-and-send',
+      payload: { channel: 'email' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(JSON.parse(response.body)).toEqual(
+      expect.objectContaining({ error: 'Cannot send to suppressed contact' })
+    );
+    expect(mockRedisLpush).not.toHaveBeenCalled();
+  });
+
+  test('verify-and-send to clean lead queues a verify-send job', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('FROM suppressions')) return [];
+      if (query.includes('FROM leads l LEFT JOIN hr_contacts')) {
+        return [{ do_not_contact: false, email_status: 'unknown', whatsapp_status: 'unknown', hr_email: 'hr@x.com', hr_mobile: null }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/verify-and-send',
+      payload: { channel: 'email' },
     });
 
     expect(response.statusCode).toBe(202);
     expect(mockRedisLpush).toHaveBeenCalledWith(
-      'draft_queue:requests',
+      'verify_send_queue:requests',
       expect.stringContaining('550e8400-e29b-41d4-a716-446655440000'),
     );
+  });
+
+  test('send to suppressed contact returns 403 without queueing', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('FROM suppressions')) {
+        return [{ '1': 1 }];
+      }
+      if (query.includes('hr_contact_id')) {
+        return [{ do_not_contact: false, email_status: 'valid', whatsapp_status: 'registered', hr_email: 'optout@x.com', hr_mobile: null }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/send',
+      payload: { channel: 'email' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mockRedisLpush).not.toHaveBeenCalled();
   });
 });

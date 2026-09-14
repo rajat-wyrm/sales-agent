@@ -2,17 +2,14 @@ import { FastifyPluginAsync } from 'fastify';
 import { authenticate } from '../middleware/auth';
 import { getRedis } from '../utils/redis';
 
-const SSE_HEADERS = {
-  'Content-Type': 'text/event-stream',
-  'Cache-Control': 'no-cache',
-  'Connection': 'keep-alive',
-  'X-Accel-Buffering': 'no',
-};
-
 function setSSEHeaders(reply: any) {
-  for (const [key, value] of Object.entries(SSE_HEADERS)) {
-    reply.header(key, value);
-  }
+  // Raw headers on the hijacked response: Fastify must NOT manage this reply
+  // (reply.raw.write without hijack produces a 200 with no content-type, which
+  // browsers reject as "not text/event-stream"). Call reply.hijack() first.
+  reply.raw.setHeader('Content-Type', 'text/event-stream');
+  reply.raw.setHeader('Cache-Control', 'no-cache');
+  reply.raw.setHeader('Connection', 'keep-alive');
+  reply.raw.setHeader('X-Accel-Buffering', 'no');
 }
 
 export const wsRoutes: FastifyPluginAsync = async (fastify) => {
@@ -20,7 +17,7 @@ export const wsRoutes: FastifyPluginAsync = async (fastify) => {
     '/sse',
     { preHandler: [authenticate] },
     async (req, reply) => {
-      reply.type('text/event-stream');
+      reply.hijack();
       setSSEHeaders(reply);
 
       const userId = (req.user as { id: string }).id;
@@ -34,7 +31,11 @@ export const wsRoutes: FastifyPluginAsync = async (fastify) => {
 
       const channel = `user:${userId}:sse`;
       const subscriber = redis.duplicate();
-      await subscriber.subscribe(channel);
+      // Personal channel (direct actions) PLUS the broadcast channel (army /
+      // scheduler completions, published under sentinel requesters no browser
+      // subscribes to). Without broadcast, background wave completions never
+      // reach any UI.
+      await subscriber.subscribe(channel, 'broadcast:sse');
 
       const send = (data: unknown) => {
         if (req.raw.destroyed) return;
@@ -82,12 +83,12 @@ export const wsRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(503).send({ error: 'Redis not available' });
         }
 
-        reply.type('text/event-stream');
+        reply.hijack();
         setSSEHeaders(reply);
 
         const channel = `user:${userId}:sse`;
         const subscriber = redis.duplicate();
-        await subscriber.subscribe(channel);
+        await subscriber.subscribe(channel, 'broadcast:sse');
 
         const send = (data: unknown) => {
           if (req.raw.destroyed) return;
@@ -125,7 +126,7 @@ export const wsRoutes: FastifyPluginAsync = async (fastify) => {
     '/live/stats',
     { preHandler: [authenticate] },
     async (req, reply) => {
-      reply.type('text/event-stream');
+      reply.hijack();
       setSSEHeaders(reply);
 
       const redis = getRedis();

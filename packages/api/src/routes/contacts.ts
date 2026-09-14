@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getDB } from '../utils/db';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
+import { logAuditEvent } from '../utils/audit';
 
 const contactSchema = z.object({
   full_name: z.string().optional(),
@@ -152,6 +153,14 @@ export const contactsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Contact not found' });
     }
 
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'correct_contact',
+      resource_type: 'hr_contact',
+      resource_id: id,
+      details: { fields: Object.keys(bodyResult.data) },
+    });
+
     return { contact: result[0] };
   });
 
@@ -171,6 +180,14 @@ export const contactsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!result || result.length === 0) {
       return reply.status(404).send({ error: 'Contact not found' });
     }
+
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'delete_contact',
+      resource_type: 'hr_contact',
+      resource_id: id,
+      details: {},
+    });
 
     return { message: 'Contact deleted' };
   });

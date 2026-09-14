@@ -53,6 +53,31 @@ export const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
 
       const noContact = await sql.unsafe(`SELECT COUNT(*) as total FROM leads WHERE do_not_contact = true`);
 
+      const trend = await sql.unsafe(`
+        SELECT to_char(created_at, 'YYYY-MM-DD') as day, COUNT(*) as discovered
+        FROM leads
+        WHERE created_at > NOW() - INTERVAL '14 days'
+        GROUP BY 1 ORDER BY 1
+      `);
+
+      const verificationOutcomes = await sql.unsafe(`
+        SELECT channel, result, COUNT(*) as count
+        FROM verification_log
+        WHERE created_at > NOW() - INTERVAL '7 days'
+        GROUP BY channel, result
+      `);
+
+      const outreachOutcomes = await sql.unsafe(`
+        SELECT channel, delivery_status, COUNT(*) as count
+        FROM outreach_log
+        WHERE sent_at > NOW() - INTERVAL '7 days'
+        GROUP BY channel, delivery_status
+      `);
+
+      const new24h = await sql.unsafe(
+        `SELECT COUNT(*) as total FROM leads WHERE created_at > NOW() - INTERVAL '24 hours'`,
+      );
+
       return {
         funnel,
         totals: {
@@ -61,7 +86,11 @@ export const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           warm: Number(warmLeads[0]?.total ?? 0),
           cold: Number(coldLeads[0]?.total ?? 0),
           do_not_contact: Number(noContact[0]?.total ?? 0),
+          new_24h: Number((new24h[0] as any)?.total ?? 0),
         },
+        trend_14d: trend,
+        verification_7d: verificationOutcomes,
+        outreach_7d: outreachOutcomes,
         source_health: sourceHealth,
         recent_runs: recentRuns,
         credit_usage: creditUsage,

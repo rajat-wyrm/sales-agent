@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getDB } from '../utils/db';
 import { env } from '../utils/env';
 import { logAuditEvent } from '../utils/audit';
+import { publishSSE } from '../utils/sse';
 import { redactEmail, redactPhone } from '../utils/redact';
 
 // Verifies a svix-style signature header (Resend webhooks) or Meta X-Hub-Signature-256
@@ -67,6 +68,44 @@ const whatsappWebhookSchema = z.object({
 });
 
 export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
+  // Backend -> frontend: provider delivery events change lead state outside
+  // any user session, so the owning rep's UI would go stale. Notify each
+  // affected lead's assignee (nothing for unassigned). publishSSE never
+  // throws, so this is safe inline in webhook handlers.
+  async function notifyOwners(leadIds: Array<string | null | undefined>) {
+    const ids = [...new Set((leadIds || []).filter(Boolean))] as string[];
+    if (ids.length === 0) return;
+    const sql = getDB();
+    const rows = await sql.unsafe(
+      `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[])`,
+      [ids],
+    );
+    for (const r of rows as unknown as Array<{ id: string; assigned_to: string | null }>) {
+      if (r.assigned_to) {
+        await publishSSE(r.assigned_to, { type: 'lead_updated', lead_id: r.id });
+      }
+    }
+  }
+
+  async function leadIdsForMessage(messageId: string): Promise<string[]> {
+    const sql = getDB();
+    const rows = await sql.unsafe(
+      `SELECT lead_id FROM outreach_log WHERE provider_message_id = $1`,
+      [messageId],
+    );
+    return (rows as unknown as Array<{ lead_id: string }>).map((r) => r.lead_id);
+  }
+
+  async function leadIdsForEmail(email: string): Promise<string[]> {
+    const sql = getDB();
+    const rows = await sql.unsafe(
+      `SELECT l.id FROM leads l
+        JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+       WHERE lower(hc.personal_email) = lower($1)`,
+      [String(email || '').trim()],
+    );
+    return (rows as unknown as Array<{ id: string }>).map((r) => r.id);
+  }
   // Keep the exact raw body around so webhook signatures can be verified.
   // Scoped to this plugin (only webhook routes), so other routes keep their parser.
   fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
@@ -106,6 +145,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
          WHERE id = (SELECT lead_id FROM outreach_log WHERE provider_message_id = $1 LIMIT 1)`,
         [messageId],
       );
+      await notifyOwners(await leadIdsForMessage(messageId));
     }
 
     if (type === 'email.bounced') {
@@ -143,6 +183,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         resource_id: null,
         details: { recipient: redactEmail(recipient), message_id: messageId },
       });
+      await notifyOwners(await leadIdsForMessage(messageId));
     }
 
     if (type === 'email.complained') {
@@ -186,6 +227,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         resource_id: null,
         details: { recipient: redactEmail(recipient) },
       });
+      await notifyOwners(await leadIdsForEmail(recipient));
     }
 
     if (type === 'email.replied' || type === 'email.reply') {
@@ -212,6 +254,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         resource_id: null,
         details: { recipient: redactEmail(recipient), message_id: messageId },
       });
+      await notifyOwners(await leadIdsForMessage(messageId));
     }
 
     return { status: 'ok' };
@@ -244,17 +287,35 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
 
                 const leadResult = await sql.unsafe(
                   `SELECT l.id FROM leads l
-                   JOIN companies c ON l.company_id = c.id
-                   WHERE c.default_phone = $1`,
+                   LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+                   LEFT JOIN companies c ON l.company_id = c.id
+                   WHERE hc.personal_mobile = $1 OR c.default_phone = $1
+                   LIMIT 1`,
                   [from],
                 );
 
                 if (leadResult && leadResult.length > 0) {
-                  await sql.unsafe(
-                    `UPDATE leads SET pipeline_stage = 'replied', updated_at = NOW()
-                     WHERE id = $1`,
-                    [(leadResult as any[])[0].id],
-                  );
+                  // STOP / OPT-OUT keywords become a global suppression (server-side).
+                  if (/^\s*(stop|unsubscribe|opt.?out|do not (contact|message|text)|dnd)\b/i.test(msgBody || '')) {
+                    const normalized = String(from).trim().toLowerCase();
+                    await sql.unsafe(
+                      `INSERT INTO suppressions (normalized_contact, channel, reason, source)
+                       VALUES ($1, 'whatsapp', 'opted_out', 'whatsapp_webhook')
+                       ON CONFLICT (normalized_contact, channel) DO NOTHING`,
+                      [normalized],
+                    );
+                    await sql.unsafe(
+                      `UPDATE leads SET do_not_contact = true, pipeline_stage = 'suppressed', updated_at = NOW() WHERE id = $1`,
+                      [(leadResult as any[])[0].id],
+                    );
+                  } else {
+                    await sql.unsafe(
+                      `UPDATE leads SET pipeline_stage = 'replied', updated_at = NOW()
+                       WHERE id = $1`,
+                      [(leadResult as any[])[0].id],
+                    );
+                  }
+                  await notifyOwners([(leadResult as any[])[0].id]);
                 }
 
                 await logAuditEvent({

@@ -1,4 +1,4 @@
-import { calculateLeadScore } from '../src/utils/scoring';
+import { calculateLeadScore, DEFAULT_WEIGHTS, loadScoringWeights } from '../src/utils/scoring';
 
 describe('Lead Scoring (SRS §5.1)', () => {
   test('hot lead: full info + verification', () => {
@@ -107,5 +107,60 @@ describe('Lead Scoring (SRS §5.1)', () => {
     const result = calculateLeadScore({});
     expect(result.band).toBe('cold');
     expect(result.score).toBeLessThan(40);
+  });
+});
+
+describe('Scoring weights override (admin settings)', () => {
+  const fullInput = {
+    hr_name: 'John Smith',
+    hr_personal_email: 'john@company.com',
+    hr_linkedin_url: 'https://linkedin.com/in/johnsmith',
+    job_description: 'x'.repeat(150),
+    job_url: 'https://company.com/jobs/1',
+    salary_range: '10-15 LPA',
+    email_status: 'valid',
+    whatsapp_status: 'registered',
+  };
+
+  test('defaults unchanged without overrides', () => {
+    expect(calculateLeadScore(fullInput).score).toBe(90);
+  });
+
+  test('operator can upweight verification', () => {
+    const result = calculateLeadScore(fullInput, { email_verified: 30, whatsapp_verified: 30 });
+    expect(result.breakdown.email_verified!.points).toBe(30);
+    expect(result.score).toBe(130);
+  });
+
+  test('zero weight removes a signal', () => {
+    const result = calculateLeadScore(fullInput, { hr_name: 0 });
+    expect(result.breakdown.hr_name!.points).toBe(0);
+    expect(result.score).toBe(70);
+  });
+
+  test('invalid weights are clamped/ignored', () => {
+    const result = calculateLeadScore(fullInput, { hr_name: -5, hr_contact: 1000, bogus: 10 } as any);
+    expect(result.breakdown.hr_name!.points).toBe(0);
+    expect(result.breakdown.hr_contact!.points).toBe(100);
+  });
+
+  test('Settings UI key names work as aliases', () => {
+    const result = calculateLeadScore(fullInput, { hr_name_found: 30 } as any);
+    expect(result.breakdown.hr_name!.points).toBe(30);
+    expect(result.score).toBe(100);
+  });
+
+  test('loadScoringWeights falls back to defaults on missing/bad rows', async () => {
+    const emptyDb = { unsafe: async () => [] } as any;
+    expect(await loadScoringWeights(emptyDb)).toEqual({ ...DEFAULT_WEIGHTS });
+    const badDb = { unsafe: async () => { throw new Error('down'); } } as any;
+    expect(await loadScoringWeights(badDb)).toEqual({ ...DEFAULT_WEIGHTS });
+  });
+
+  test('loadScoringWeights reads the settings row', async () => {
+    const db = { unsafe: async () => [{ value: { hr_name: 30 } }] } as any;
+    const w = await loadScoringWeights(db);
+    expect(w.hr_name).toBe(30);
+    expect(w.hr_contact).toBe(DEFAULT_WEIGHTS.hr_contact);
   });
 });
