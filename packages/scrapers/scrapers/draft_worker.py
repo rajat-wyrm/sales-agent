@@ -121,6 +121,11 @@ async def generate_gemini_drafts(
             "hr_name": lead_data.get("hr_name", "") or "",
             "salary_range": lead_data.get("salary_range", "") or "",
             "job_url": lead_data.get("job_url", "") or "",
+            "location": lead_data.get("location", "") or "",
+            "workplace_type": lead_data.get("workplace_type", "") or "",
+            "department": lead_data.get("department", "") or "",
+            "openings_count": ("" if lead_data.get("openings_count") is None
+                               else str(lead_data["openings_count"])),
         })
 
         model = genai.GenerativeModel(
@@ -171,6 +176,10 @@ async def process_draft_job(
                    c.name as company_name, c.about as about_company, c.default_email,
                    jp.title as job_title, jp.description as about_job,
                    jp.experience_level, jp.salary_range, jp.job_url, jp.source_site,
+                   -- Grounding context for the draft: work mode and place are the
+                   -- two things a recruiter actually cares about, and were absent.
+                   jp.location, jp.city, jp.state, jp.country, jp.location_type,
+                   jp.department, jp.openings_count, jp.posted_at::text as posted_at,
                    hc.full_name as hr_name, hc.linkedin_url
             FROM leads l
             JOIN companies c ON l.company_id = c.id
@@ -195,6 +204,14 @@ async def process_draft_job(
             "salary_range": lead["salary_range"] or "",
             "job_url": lead["job_url"] or "",
             "source_site": lead["source_site"] or "",
+            "location": lead["location"] or "",
+            "city": lead["city"] or "",
+            "state": lead["state"] or "",
+            "country": lead["country"] or "",
+            "workplace_type": (lead["location_type"] or "").capitalize(),
+            "department": lead["department"] or "",
+            "openings_count": lead["openings_count"],
+            "posted_at": lead["posted_at"] or "",
         }
 
         # Try Gemini first

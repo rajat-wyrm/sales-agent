@@ -19,3 +19,4 @@ free-proxy>=1.2.0
 fake-useragent>=1.1.0
 sherlock-project>=0.16.0
 curl_cffi>=0.7.0
+google-generativeai>=0.8.3
