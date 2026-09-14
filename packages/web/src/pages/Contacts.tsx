@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth';
 import { contacts as contactsApi, HRContact } from '@/lib/api';
+import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import {
   useReactTable,
   getCoreRowModel,
@@ -59,7 +60,14 @@ const Contacts: React.FC = () => {
   const { data, isLoading, isError, error, refetch } = useQuery(
     ['contacts', pagination.pageIndex + 1, PAGE_SIZE, globalFilter],
     () => contactsApi.list({ page: pagination.pageIndex + 1, limit: PAGE_SIZE, search: globalFilter || undefined }),
+    // These pages had no live wiring at all: a scrape or enrichment elsewhere
+    // left them showing whatever was loaded at mount until a manual reload.
+    { staleTime: 15000, refetchInterval: 20000, onError: () => {} },
   );
+
+  useSSE('/sse/token', (event) => {
+    if (isLeadLifecycleEvent(event.type)) refetch();
+  });
 
   const createMutation = useMutation((data: Partial<HRContact>) => contactsApi.create(data), {
     onSuccess: () => {

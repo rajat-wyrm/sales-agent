@@ -11,6 +11,7 @@ import { ErrorState } from '@/components/ui/error-state';
 import { useToast } from '@/components/ui/toast';
 import { AlertTriangle, Merge, X, Copy } from 'lucide-react';
 import { stageMeta, SCORE_BAND_META, formatDate } from '@/lib/format';
+import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 
 interface DuplicateCandidate {
   lead_id: string;
@@ -41,7 +42,16 @@ const scoreBadge = (score: number) => {
 const Duplicates: React.FC = () => {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const { data, isLoading, error, refetch } = useQuery('duplicates', () => leadsApi.getDuplicates());
+  const { data, isLoading, error, refetch } = useQuery('duplicates', () => leadsApi.getDuplicates(), {
+    // Duplicate detection runs during scraping, so this list goes stale on its
+    // own; it previously had neither live events nor polling.
+    staleTime: 15000,
+    refetchInterval: 20000,
+  });
+
+  useSSE('/sse/token', (event) => {
+    if (isLeadLifecycleEvent(event.type)) refetch();
+  });
 
   const mergeMutation = useMutation(
     ({ leadId, mergeIntoId }: { leadId: string; mergeIntoId: string }) =>
