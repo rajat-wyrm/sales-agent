@@ -149,10 +149,19 @@ async def send_email(
     email: str, subject: str, body: str, api_key: str, from_email: str,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Send email via Resend or Brevo API."""
-    # Try Resend first
-    resend_key = api_key if api_key.startswith("re_") else None
-    brevo_key = api_key if api_key.startswith("key-") else api_key
+    """Send email via Resend or Brevo API.
+
+    Provider is chosen by key prefix so one key is never offered to the other
+    vendor: previously a non-"key-" string (including a Resend "re_" key) fell
+    through to Brevo, burning a request and returning provider="unknown".
+    """
+    key = (api_key or "").strip()
+    resend_key = key if key.startswith("re_") else ""
+    # Brevo API keys are documented as starting with "keysib-".
+    brevo_key = key if key.startswith("keysib-") else ""
+    if not resend_key and not brevo_key:
+        return {"status": "blocked", "provider": None, "provider_message_id": None,
+                "raw": {"error": "email_provider_not_configured"}}
 
     import httpx
 
@@ -161,7 +170,7 @@ async def send_email(
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    "https://api.resend.email/v1/emails/send",
+                    "https://api.resend.com/api/emails",
                     headers=resend_headers(resend_key, idempotency_key),
                     json={
                         "from": from_email,
@@ -183,12 +192,21 @@ async def send_email(
             logger.error(f"Resend send failed: {e}")
 
     # Try Brevo
+    if not brevo_key:
+        # Only a Resend key was supplied and that send failed; report the provider
+        # we actually tried rather than falling through to provider="unknown".
+        return {"status": "failed", "provider": "resend", "provider_message_id": None,
+                "raw": {"error": "resend_send_failed"}}
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.brevo.com/v3/smtpEmail",
+                # Verified live: Brevo authenticates with an `api-key` header and
+                # answers "Key not found"; the previous Bearer form returned
+                # "token is invalid or expired" even for a correctly formed key.
                 headers={
-                    "Authorization": f"Bearer {brevo_key}",
+                    "api-key": brevo_key,
                     "Content-Type": "application/json",
                 },
                 json={
@@ -198,7 +216,7 @@ async def send_email(
                     "htmlContent": body,
                 },
             )
-            if resp.status_code == 202 or resp.status_code == 201:
+            if resp.status_code in (201, 202):
                 data = resp.json()
                 return {
                     "status": "sent",
@@ -210,7 +228,9 @@ async def send_email(
     except Exception as e:
         logger.error(f"Brevo send failed: {e}")
 
-    return {"status": "failed", "provider": "unknown", "provider_message_id": None, "raw": {"error": "no provider available"}}
+    # Unreachable in practice (a key matches one branch above); kept honest.
+    return {"status": "failed", "provider": "brevo", "provider_message_id": None,
+            "raw": {"error": "brevo_send_failed"}}
 
 
 async def send_whatsapp(
