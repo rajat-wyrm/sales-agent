@@ -246,6 +246,13 @@ async def run_queue_consumer(
                 if raw_msg is not None:
                     await ack(redis_client, queue_name, raw_msg)
                 await requeue_or_dlq(redis_client, queue_name, payload)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as dlq_err:  # noqa: BLE001
+                # Losing this job silently defeats the durability work:
+                # ack already removed it from :processing, so if the requeue
+                # or DLQ write failed there is now no copy anywhere. Say so
+                # at ERROR with the payload id so an operator can recover it.
+                logger.error(
+                    f"JOB LOST in {queue_name}: acked but requeue/DLQ failed ({dlq_err}); "
+                    f"payload={str(payload)[:200]}"
+                )
             await asyncio.sleep(5)

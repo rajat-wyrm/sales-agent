@@ -315,8 +315,15 @@ async def consume_draft_queue(
                 if raw_msg is not None:
                     await ack(redis_client, "draft_queue:requests", raw_msg)
                 await requeue_or_dlq(redis_client, "draft_queue:requests", payload)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as dlq_err:  # noqa: BLE001
+                # The job was already acked out of :processing, so a failed
+                # requeue/DLQ write leaves no copy anywhere. Surface it at ERROR
+                # with the payload so an operator can recover it instead of the
+                # lead silently never being enriched.
+                logger.error(
+                    f"JOB LOST in draft_queue:requests: acked but requeue/DLQ failed ({dlq_err}); "
+                    f"payload={str(payload)[:200]}"
+                )
             await asyncio.sleep(5)
 
     return processed
