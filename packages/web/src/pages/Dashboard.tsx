@@ -102,7 +102,13 @@ const Dashboard: React.FC = () => {
 
   // Live enrichment coverage = verified+drafted / total (how complete contacts are).
   const enrichedCount = (funnel.enriched || 0) + (funnel.verified || 0) + (funnel.drafted || 0) + (funnel.contacted || 0);
-  const coverage = totalLeads ? Math.round((enrichedCount / totalLeads) * 100) : 0;
+  // Leads the army processed and found NO usable contact are a real outcome, not an
+  // untried row. Counting only successes made coverage read 0% while 416 of 418 leads
+  // had in fact been enriched and correctly came back empty -- which pushed reps to
+  // re-run enrichment on records that will never yield a contact.
+  const noContactCount = funnel.contact_unavailable || 0;
+  const attemptedCount = enrichedCount + noContactCount;
+  const coverage = totalLeads ? Math.round((attemptedCount / totalLeads) * 100) : 0;
 
   const q = armyStatus || { raw: 0, enrichment: 0, verification: 0, draft: 0 };
   const queued = (q.raw || 0) + (q.enrichment || 0) + (q.verification || 0) + (q.draft || 0);
@@ -245,7 +251,7 @@ const Dashboard: React.FC = () => {
         {/* coverage + bands + live queue */}
         <div className="flex flex-col gap-phi3">
           <Card>
-            <CardHeader><CardTitle className="flex items-center gap-2"><MailCheck className="h-5 w-5 text-success" />Enrichment Coverage</CardTitle></CardHeader>
+            <CardHeader><CardTitle className="flex items-center gap-2"><MailCheck className="h-5 w-5 text-success" />Army Processing Rate</CardTitle></CardHeader>
             <CardContent className="flex items-center gap-5">
               <div className="relative h-28 w-28 shrink-0">
                 <ResponsiveContainer width="100%" height="100%">
@@ -261,8 +267,8 @@ const Dashboard: React.FC = () => {
                 </div>
               </div>
               <div className="text-[13px] text-muted-foreground">
-                <p className="font-medium text-foreground">{enrichedCount} of {totalLeads}</p>
-                <p>leads enriched → verified → drafted by the fallback army.</p>
+                <p className="font-medium text-foreground">{attemptedCount} of {totalLeads} attempted</p>
+                <p>{enrichedCount} with a usable contact · {noContactCount} reached no contact</p>
               </div>
             </CardContent>
           </Card>
