@@ -36,6 +36,7 @@ import {
   Globe,
   Building2,
   ExternalLink,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   SCORE_BAND_META,
@@ -494,6 +495,21 @@ const LeadDetail: React.FC = () => {
                 ['Department', lead.department],
                 ['Openings', lead.openings_count != null ? String(lead.openings_count) : null],
                 ['Posted', lead.posted_at ? formatDate(lead.posted_at) : null],
+                // How sure we are that this contact is really the person at this
+                // company -- reps use it to decide whether to email or re-verify.
+                ['Contact confidence', lead.hr_confidence != null
+                  ? `${Math.round(Number(lead.hr_confidence))}${Number(lead.hr_confidence) <= 1 ? '%' : ''}` : null],
+                ['Last updated', lead.updated_at ? formatDate(lead.updated_at) : null],
+                // Compliance fields: populated on every lead yet never shown, so a
+                // rep could not see the lawful basis for contacting someone or that
+                // this row duplicates another one.
+                ['Legal basis', lead.legal_basis],
+                ['Processing purpose', lead.processing_purpose],
+                ['Website', lead.website_url],
+                ['Company email', lead.default_email],
+                ['Company phone', lead.default_phone],
+                ['Industry', lead.industry],
+                ['Company size', lead.size_estimate],
               ].filter(([, v]) => v).map(([k, v]) => (
                 <div key={k} className="flex items-start justify-between gap-4 py-2.5">
                   <dt className="text-muted-foreground">{k}</dt>
@@ -688,6 +704,19 @@ const LeadDetail: React.FC = () => {
             })}
           </CardContent>
         </Card>
+      )}
+
+      {lead.possible_duplicate_of && (
+        <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-[13px]">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <span>
+            Flagged as a possible duplicate of another lead.{' '}
+            <button type="button" className="font-medium underline" onClick={() => navigate(`/leads/${lead.possible_duplicate_of}`)}>
+              Open the other lead
+            </button>{' '}
+            — review both before sending anything twice.
+          </span>
+        </div>
       )}
 
       <Card>

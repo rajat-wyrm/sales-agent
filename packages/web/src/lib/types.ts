@@ -102,8 +102,20 @@ export interface Lead {
 
 export interface LeadDetail extends Lead {
   about_company: string | null;
+  about_job: string | null;
   industry: string | null;
   size_estimate: string | null;
+  website_url: string | null;
+  default_email: string | null;
+  default_phone: string | null;
+  legal_basis: string | null;
+  processing_purpose: string | null;
+  possible_duplicate_of: string | null;
+  job_posting_id: string | null;
+  company_id: string | null;
+  hr_contact_id: string | null;
+  hr_confidence: number | null;
+  domain: string | null;
   hr_extraction_provenance?: any;
   enrichment_log: EnrichmentLog[];
   verification_log: VerificationLog[];
