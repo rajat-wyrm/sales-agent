@@ -588,8 +588,11 @@ async def run_holehe_check(email: str) -> dict[str, Any]:
     Parse the real "[+]/[x]/[-]" line output instead.
     """
     try:
+        # "--" ends option parsing so an address beginning with "-" cannot be read as
+        # a flag. Callers validate the format first, but this function is exported and
+        # should not depend on that.
         proc = await asyncio.create_subprocess_exec(
-            "holehe", email, "--no-color", "--no-clear",
+            "holehe", "--no-color", "--no-clear", "--", email,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
