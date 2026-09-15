@@ -1697,6 +1697,18 @@ async def _normalize_worker(
                 await ack(redis_client, "raw_leads_queue:requests", raw_msg)
                 continue
 
+            # A blank company name is a scraper parse failure, not an incomplete
+            # record: companies.name is blank-constrained in the DB, and the HR
+            # dork cascade burns search quota on an empty query (" linkedin
+            # recruiter"), then fails 5 pointless retries into the DLQ.
+            if not (normalized.get("company_name") or "").strip():
+                logger.info(
+                    f"Skipping lead with blank company: {normalized['job_title']} "
+                    f"[{normalized.get('source_site')}]"
+                )
+                await ack(redis_client, "raw_leads_queue:requests", raw_msg)
+                continue
+
             # Enrich HR data with LinkedIn cross-reference and OSINT per SRS §4.5
             normalized = await enrich_hr_data(normalized, db_pool)
 
@@ -1752,6 +1764,11 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
                 continue
 
             if not normalized.get("is_india", True):
+                skipped += 1
+                continue
+
+            if not (normalized.get("company_name") or "").strip():
+                logger.info(f"Skipping lead with blank company: {normalized.get('job_title')}")
                 skipped += 1
                 continue
 
