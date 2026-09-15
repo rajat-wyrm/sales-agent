@@ -557,7 +557,9 @@ function DetailBlock({ title, children }: { title: string; children: React.React
 /** Inline row action: icon + word, its own spinner while pending. A bare icon
     button hid what each action did; a full-size Button made the row 40px tall. */
 const CHIP_TONES: Record<string, string> = {
-  primary: 'border-primary/25 bg-primary/[0.07] text-primary hover:bg-primary/15',
+  // #8B7BF7 rather than the brand violet: at 11px the theme colour measured 4.49:1
+  // against this background, a hair under WCAG AA's 4.5 for small text.
+  primary: 'border-primary/30 bg-primary/[0.09] text-[#8b7bf7] hover:bg-primary/15 dark:text-[#8b7bf7]',
   info: 'border-info/25 bg-info/[0.07] text-info hover:bg-info/15',
   success: 'border-success/25 bg-success/[0.07] text-success hover:bg-success/15',
 };
