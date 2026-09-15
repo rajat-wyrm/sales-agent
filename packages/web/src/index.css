@@ -1,7 +1,156 @@
 @import '@fontsource-variable/inter';
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@source './';
+
+/*
+ * Tailwind v4 CSS-first theme. This replaces the former tailwind.config.js
+ * `theme.extend`. Colours reference the runtime HSL channel vars defined on
+ * :root below (see @layer base); `inline` so opacity modifiers and the dark
+ * indirection both resolve through color-mix at use time.
+ */
+@theme inline {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-primary-hover: hsl(var(--primary-hover));
+  --color-primary-soft: hsl(var(--primary-soft));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-destructive-soft: hsl(var(--destructive-soft));
+
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-success-soft: hsl(var(--success-soft));
+
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-warning-soft: hsl(var(--warning-soft));
+
+  --color-info: hsl(var(--info));
+  --color-info-foreground: hsl(var(--info-foreground));
+  --color-info-soft: hsl(var(--info-soft));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-surface: hsl(var(--surface));
+  --color-border-strong: hsl(var(--border-strong));
+
+  --color-sidebar: hsl(var(--surface));
+  --color-sidebar-foreground: hsl(var(--foreground));
+  --color-sidebar-muted: hsl(var(--muted));
+  --color-sidebar-border: hsl(var(--border));
+  --color-sidebar-active: hsl(var(--primary-soft));
+  --color-sidebar-active-foreground: hsl(var(--primary-hover));
+
+  --color-hot: hsl(var(--destructive));
+  --color-hot-soft: hsl(var(--destructive-soft));
+  --color-warm: hsl(var(--warning));
+  --color-warm-soft: hsl(var(--warning-soft));
+  --color-cold: hsl(var(--info));
+  --color-cold-soft: hsl(var(--info-soft));
+}
+
+@theme {
+  /* Golden-ratio (φ=1.618) modular spacing scale off an 8px grid. */
+  --spacing-phi1: 0.5rem;   /* 8 */
+  --spacing-phi2: 0.8125rem; /* 13 ≈ 8×1.618 */
+  --spacing-phi3: 1.3125rem; /* 21 ≈ 13×1.618 */
+  --spacing-phi4: 2.125rem;  /* 34 ≈ 21×1.618 */
+  --spacing-phi5: 3.4375rem; /* 55 ≈ 34×1.618 */
+
+  /* φ≈1.333 type ramp. */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.112;
+  --text-xs--letter-spacing: 0.01em;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.485;
+  --text-base: 1rem;
+  --text-base--line-height: 1.618;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.485;
+  --text-lg--letter-spacing: -0.01em;
+  --text-xl: 1.3125rem;
+  --text-xl--line-height: 1.485;
+  --text-xl--letter-spacing: -0.015em;
+  --text-2xl: 1.618rem;
+  --text-2xl--line-height: 1.25;
+  --text-2xl--letter-spacing: -0.02em;
+  --text-3xl: 2.291rem;
+  --text-3xl--line-height: 1.15;
+  --text-3xl--letter-spacing: -0.025em;
+  --text-4xl: 3.052rem;
+  --text-4xl--line-height: 1.08;
+  --text-4xl--letter-spacing: -0.03em;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.618rem;
+  --radius-xl: 0.8125rem;
+  --radius-2xl: 1.3125rem;
+
+  --max-w-phi-body: 46rem;
+  --max-w-content: 88rem;
+
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Inter Variable', system-ui, sans-serif;
+
+  --shadow-card: var(--glow-soft);
+  --shadow-float: 0 20px 50px -22px rgb(0 0 0 / 0.75), inset 0 1px 0 0 hsl(var(--foreground) / 0.05);
+  --shadow-card-hover: 0 16px 40px -18px hsl(var(--primary) / 0.35);
+  --shadow-glow: var(--glow-primary);
+  --shadow-glow-sm: 0 0 22px -6px hsl(var(--primary) / 0.5);
+
+  --z-dropdown: 50;
+  --z-sticky: 20;
+  --z-overlay: 60;
+  --z-drawer: 60;
+  --z-palette: 90;
+  --z-modal: 80;
+  --z-toast: 120;
+
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-fade-up: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-scale-in: scaleIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-drawer-in: drawerIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-overlay-in: overlayIn 0.2s ease both;
+  --animate-gradient-move: gradientMove 8s ease infinite;
+  --animate-fade-in: fadeIn 0.4s ease both;
+  --animate-pulse-glow: pulseGlow 2.4s ease-in-out infinite;
+  --animate-aurora: aurora 18s ease-in-out infinite;
+  --animate-slide-up: slideUp 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-toast-in: toastIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-toast-out: toastOut 0.2s ease both;
+
+  @keyframes shimmer { 0% { background-position: 400% 0; } 100% { background-position: -400% 0; } }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes scaleIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+  @keyframes drawerIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+  @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes gradientMove { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+  @keyframes pulseGlow { 0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.4); } 50% { box-shadow: 0 0 28px 4px hsl(var(--primary) / 0.5); } }
+  @keyframes shimmerText { to { background-position: 200% center; } }
+  @keyframes aurora { 0% { transform: translate(0, 0) rotate(0deg); } 50% { transform: translate(4%, -4%) rotate(8deg); } 100% { transform: translate(0, 0) rotate(0deg); } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes toastIn { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-6px); } }
+}
 
 @layer base {
   :root {
@@ -222,15 +371,6 @@
   .glass-strong {
     @apply bg-surface/85 backdrop-blur-2xl;
   }
-  .animate-fade-up {
-    animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-  .animate-scale-in {
-    animation: scaleIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-  .animate-pulse-glow {
-    animation: pulseGlow 2.4s ease-in-out infinite;
-  }
   .shimmer-text {
     background: linear-gradient(
       90deg,
@@ -246,40 +386,3 @@
     animation: shimmerText 6s linear infinite;
   }
 }
-
-/* ---- keyframes (referenced by .animate-* + .card/.skeleton above) ---- */
-@keyframes shimmer {
-  0% { background-position: 400% 0; }
-  100% { background-position: -400% 0; }
-}
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
-}
-@keyframes pulseGlow {
-  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.4); }
-  50% { box-shadow: 0 0 28px 4px hsl(var(--primary) / 0.5); }
-}
-@keyframes shimmerText {
-  to { background-position: 200% center; }
-}
-@keyframes float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
-}
-@keyframes aurora {
-  0% { transform: translate(0, 0) rotate(0deg); }
-  50% { transform: translate(4%, -4%) rotate(8deg); }
-  100% { transform: translate(0, 0) rotate(0deg); }
-}
-.animate-fade-in { animation: fadeIn 0.4s ease both; }
-.animate-float { animation: float 6s ease-in-out infinite; }
-.animate-aurora { animation: aurora 18s ease-in-out infinite; }

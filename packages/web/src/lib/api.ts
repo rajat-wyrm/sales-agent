@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { LoginResponse } from './types';
 import { API_URL } from '@/lib/env';
+import { navigateToLogin } from './navigation';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -70,7 +71,7 @@ api.interceptors.response.use(
         // Drop credentials first so nothing in flight can replay the dead token,
         // then hand off to the login route.
         useAuthStore.getState().logout();
-        window.location.href = '/login';
+        navigateToLogin();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

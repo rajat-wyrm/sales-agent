@@ -18,7 +18,7 @@ const PLACEHOLDER_SECRETS = new Set([
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.string().transform(Number).default('3000'),
+  PORT: z.string().default('3000').transform(Number),
   HOST: z.string().optional(),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
@@ -49,11 +49,11 @@ const envSchema = z.object({
   WHATSAPP_WEB_URL: z.string().optional(),
   ADZUNA_APP_ID: z.string().optional(),
   ADZUNA_APP_KEY: z.string().optional(),
-  SCRAPER_MAX_CONCURRENCY: z.string().transform(Number).default('5'),
-  SCRAPER_TIMEOUT_SECONDS: z.string().transform(Number).default('30'),
-  SCRAPER_RETRY_ATTEMPTS: z.string().transform(Number).default('3'),
-  CIRCUIT_BREAKER_FAILURE_THRESHOLD: z.string().transform(Number).default('5'),
-  CIRCUIT_BREAKER_COOLDOWN_MINUTES: z.string().transform(Number).default('120'),
+  SCRAPER_MAX_CONCURRENCY: z.string().default('5').transform(Number),
+  SCRAPER_TIMEOUT_SECONDS: z.string().default('30').transform(Number),
+  SCRAPER_RETRY_ATTEMPTS: z.string().default('3').transform(Number),
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: z.string().default('5').transform(Number),
+  CIRCUIT_BREAKER_COOLDOWN_MINUTES: z.string().default('120').transform(Number),
   ADMIN_EMAIL: z.string().optional(),
   ADMIN_PASSWORD: z.string().optional(),
 });

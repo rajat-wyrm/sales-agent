@@ -17,6 +17,12 @@ module.exports = {
       tsconfig: '<rootDir>/tsconfig.json',
       useESM: false,
     }],
+    // @tanstack/react-table 9 ships ESM-only; compile it to CJS (allowed by
+    // transformIgnorePatterns below).
+    '^.+\\.m?js$': ['ts-jest', {
+      tsconfig: { allowJs: true },
+      useESM: false,
+    }],
   },
   transformIgnorePatterns: ['/node_modules/(?!@tanstack)'],
 };

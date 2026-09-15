@@ -15,7 +15,9 @@ const server = async () => {
     // trustProxy must match the actual trusted proxy hop count; off by default so
     // req.ip can't be spoofed via X-Forwarded-For (keeps rate-limiting honest).
     // Set TRUST_PROXY=true only when running behind a trusted reverse proxy.
-    trustProxy: process.env.TRUST_PROXY === 'true' ? 1 : false,
+    // (fastify 5 dropped the numeric-hop form; boolean trusts the leftmost
+    // X-Forwarded-For entry, which is the single-proxy case this gate covers.)
+    trustProxy: process.env.TRUST_PROXY === 'true',
     logger: env.NODE_ENV === 'development'
       ? { level: 'info' }
       : { level: 'warn', redact: ['req.headers.authorization'] },

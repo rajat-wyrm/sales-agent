@@ -6,12 +6,12 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
-      '@/components': path.resolve(__dirname, './src/components'),
-      '@/hooks': path.resolve(__dirname, './src/hooks'),
-      '@/lib': path.resolve(__dirname, './src/lib'),
-      '@/stores': path.resolve(__dirname, './src/stores'),
-      '@/pages': path.resolve(__dirname, './src/pages'),
+      '@': path.resolve(import.meta.dirname, './src'),
+      '@/components': path.resolve(import.meta.dirname, './src/components'),
+      '@/hooks': path.resolve(import.meta.dirname, './src/hooks'),
+      '@/lib': path.resolve(import.meta.dirname, './src/lib'),
+      '@/stores': path.resolve(import.meta.dirname, './src/stores'),
+      '@/pages': path.resolve(import.meta.dirname, './src/pages'),
     },
   },
   server: {
@@ -39,9 +39,14 @@ export default defineConfig({
     // so we ONLY split truly-shared framework code here.
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          state: ['zustand'],
+        // Rolldown (Vite 8) requires the function form of manualChunks.
+        manualChunks(id) {
+          if (/node_modules[\\/](react|react-dom|react-router|react-router-dom|@remix-run)[\\/]/.test(id)) {
+            return 'vendor';
+          }
+          if (/node_modules[\\/]zustand[\\/]/.test(id)) {
+            return 'state';
+          }
         },
       },
     },

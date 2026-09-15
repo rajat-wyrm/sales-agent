@@ -58,13 +58,13 @@ export function verifySignature(
 
 const resendWebhookSchema = z.object({
   type: z.string(),
-  data: z.record(z.unknown()),
+  data: z.record(z.string(), z.unknown()),
 });
 
 const whatsappWebhookSchema = z.object({
-  entry: z.array(z.record(z.unknown())).optional(),
+  entry: z.array(z.record(z.string(), z.unknown())).optional(),
   object: z.string().optional(),
-  message: z.record(z.unknown()).optional(),
+  message: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const webhookRoutes: FastifyPluginAsync = async (fastify) => {

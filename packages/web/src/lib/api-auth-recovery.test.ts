@@ -1,5 +1,10 @@
 import api from '@/lib/api';
 import { useAuthStore } from '@/stores/auth';
+import { navigateToLogin } from '@/lib/navigation';
+
+// jsdom 26 (jest 30) made window.location [LegacyUnforgeable], so the redirect
+// goes through a one-line seam module that automock can intercept instead.
+jest.mock('@/lib/navigation');
 
 // A JWT outlives the account it was minted for (deleted user, or a re-seeded
 // database). The API answers those requests with 401, and the interceptor is the
@@ -23,10 +28,8 @@ async function trigger(handler: any, error: any) {
 }
 
 describe('401 auth recovery', () => {
-  let original: any;
-
   beforeEach(() => {
-    original = window.location.href;
+    jest.mocked(navigateToLogin).mockClear();
     useAuthStore.setState({
       token: 'dead-access',
       refreshToken: 'dead-refresh',
@@ -38,20 +41,9 @@ describe('401 auth recovery', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
-    window.location.href = original;
   });
 
   test('clears credentials and redirects when the refresh token is also dead', async () => {
-    // jsdom refuses real navigation; record the attempt the interceptor makes.
-    let navigatedTo: string | null = null;
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: {
-        get href() { return original; },
-        set href(v: string) { navigatedTo = v; },
-      },
-    });
-
     // /auth/refresh rejects like the server does for a user that no longer exists.
     // The interceptor must surface that rejection to the leader instead of
     // queueing it behind its own refresh lock.
@@ -79,7 +71,7 @@ describe('401 auth recovery', () => {
     expect(state.token).toBeNull();
     expect(state.refreshToken).toBeNull();
     expect(api.defaults.headers.common['Authorization']).toBeUndefined();
-    expect(navigatedTo).toBe('/login');
+    expect(navigateToLogin).toHaveBeenCalledTimes(1);
   }, 10000);
 
   test('a 401 from /auth/refresh never re-enters the refresh path (deadlock guard)', async () => {
@@ -95,11 +87,6 @@ describe('401 auth recovery', () => {
 
     // Lock released => the next unrelated 401 can still start a refresh rather
     // than being parked forever behind a leader that already finished.
-    let navigatedTo: string | null = null;
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: { get href() { return original; }, set href(v: string) { navigatedTo = v; } },
-    });
     const post = jest.spyOn(api, 'post').mockRejectedValueOnce(
       Object.assign(new Error('401'), { response: respondWith(401), config: { url: '/auth/refresh', headers: {} } }),
     );
@@ -111,7 +98,7 @@ describe('401 auth recovery', () => {
     await expect(trigger(handler, other)).rejects.toBeTruthy();
     expect(post).toHaveBeenCalledWith('/auth/refresh', expect.anything());
     await settle();
-    expect(navigatedTo).toBe('/login');
+    expect(navigateToLogin).toHaveBeenCalledTimes(1);
   }, 10000);
 
   test('logout() performs no network call, so it cannot deadlock the interceptor', async () => {

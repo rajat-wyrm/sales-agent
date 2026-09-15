@@ -5,14 +5,13 @@ import { useAuthStore } from '@/stores/auth';
 import { companies as companiesApi, Company } from '@/lib/api';
 import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import {
-  useReactTable,
+  useLegacyTable as useReactTable,
   getCoreRowModel,
   getSortedRowModel,
   getPaginationRowModel,
-  flexRender,
-  createColumnHelper,
-  SortingState,
-} from '@tanstack/react-table';
+  legacyCreateColumnHelper as createColumnHelper,
+} from '@tanstack/react-table/legacy';
+import { flexRender, SortingState } from '@tanstack/react-table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';

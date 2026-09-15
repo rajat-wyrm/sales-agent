@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import {
-  useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
-  getPaginationRowModel, flexRender, createColumnHelper, SortingState,
-  ColumnFiltersState, VisibilityState,
-} from '@tanstack/react-table';
+  useLegacyTable as useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
+  getPaginationRowModel, legacyCreateColumnHelper as createColumnHelper,
+} from '@tanstack/react-table/legacy';
+import { flexRender, SortingState, ColumnFiltersState, VisibilityState } from '@tanstack/react-table';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { leads as leadsApi, admin } from '@/lib/api';
