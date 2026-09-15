@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 from typing import Any
+from scrapers.utils.mx_verifier import check_email_deliverability
 
 import redis.asyncio as redis
 import asyncpg
@@ -220,8 +221,16 @@ async def process_verification_job(
 
         # Email verification via Reacher
         if email_to_verify:
-            result = await verify_email_reacher(email_to_verify)
-            email_status = result["status"]
+            # Free DNS pre-flight first: a domain with no MX (or an NXDOMAIN typo)
+            # can never receive mail, so there is no reason to spend an SMTP
+            # round trip on it. Unknown stays silent -- only a definite False skips.
+            mx = await check_email_deliverability(email_to_verify)
+            if mx["mx"] is False:
+                email_status = "invalid"
+                result = {"status": "invalid", "raw": {"mx_check": mx["reason"]}}
+            else:
+                result = await verify_email_reacher(email_to_verify)
+                email_status = result["status"]
 
             await conn.execute(
                 """
