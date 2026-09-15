@@ -4,7 +4,7 @@ import {
   useLegacyTable as useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   getPaginationRowModel, legacyCreateColumnHelper as createColumnHelper,
 } from '@tanstack/react-table/legacy';
-import { flexRender, SortingState, ColumnFiltersState, VisibilityState } from '@tanstack/react-table';
+import { flexRender, SortingState, ColumnFiltersState, ColumnVisibilityState } from '@tanstack/react-table';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { leads as leadsApi, admin } from '@/lib/api';
@@ -128,7 +128,7 @@ const Leads: React.FC = () => {
   // display-only and a rep could not actually slice a queue by work mode or pay.
   const [workplaceFilter, setWorkplaceFilter] = useState<'' | 'remote' | 'onsite' | 'hybrid'>('');
   const [salaryFilter, setSalaryFilter] = useState<'' | 'any' | '5' | '10' | '20'>('');
-  const [visibility, setVisibility] = useState<VisibilityState>({});
+  const [visibility, setVisibility] = useState<ColumnVisibilityState>({});
   const [density, setDensity] = useState<Density>('comfortable');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 

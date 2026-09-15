@@ -16,12 +16,12 @@
     "noUnusedParameters": false,
     "esModuleInterop": true,
     "paths": {
-      "@/*": ["src/*"],
-      "@/components/*": ["src/components/*"],
-      "@/hooks/*": ["src/hooks/*"],
-      "@/lib/*": ["src/lib/*"],
-      "@/stores/*": ["src/stores/*"],
-      "@/pages/*": ["src/pages/*"]
+      "@/*": ["./src/*"],
+      "@/components/*": ["./src/components/*"],
+      "@/hooks/*": ["./src/hooks/*"],
+      "@/lib/*": ["./src/lib/*"],
+      "@/stores/*": ["./src/stores/*"],
+      "@/pages/*": ["./src/pages/*"]
     },
     "types": ["vite/client", "jest", "node"]
   },

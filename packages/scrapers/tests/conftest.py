@@ -7,6 +7,7 @@ recreate schema, flush redis). No mocks for the database or queue.
 import glob
 import os
 import re
+from pathlib import Path
 
 import asyncpg
 import pytest_asyncio
@@ -26,7 +27,9 @@ assert _db_name not in _FORBIDDEN_DBS, (
 
 SCHEMA_DIR = os.environ.get(
     "SCHEMA_DIR",
-    "/home/rajat/Downloads/sales-agent/packages/api/database/schema",
+    # Repo-relative so CI and any checkout works; was an absolute path on one
+    # laptop, which made the schema glob silently empty everywhere else.
+    str(Path(__file__).resolve().parents[3] / "packages" / "api" / "database" / "schema"),
 )
 
 # Apply in strict dependency order (matches schema/utils/apply_schema.sh):
