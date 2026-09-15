@@ -41,6 +41,66 @@ const ENRICH_PROVIDERS = [
   { key: 'apollo', label: 'Apollo.io', hint: 'key', icon: Sparkles },
 ] as const;
 
+// Every field a lead row carries, exported by name. Deliberately NOT derived from
+// table column ids: 'role'/'salary'/'posting_link' are display-only composites with no
+// matching property on the row object, so the previous export wrote empty strings for
+// them and omitted location_type, apply_url, salary bounds and more entirely.
+const EXPORT_COLUMNS: Array<[string, (r: any) => unknown]> = [
+  ['Score', (r) => r.lead_score],
+  ['Score Band', (r) => r.score_band],
+  ['Company', (r) => r.company_name],
+  ['Company Domain', (r) => r.company_domain],
+  ['Job Title', (r) => r.job_title],
+  ['Location', (r) => [r.city, r.state, r.country].filter(Boolean).join(', ') || r.location],
+  ['City', (r) => r.city],
+  ['State', (r) => r.state],
+  ['Country', (r) => r.country],
+  ['Location Type', (r) => r.location_type || (r.is_work_from_home ? 'remote' : '')],
+  ['Employment Type', (r) => r.employment_type],
+  ['Experience Level', (r) => r.experience_level],
+  ['Department', (r) => r.department],
+  ['Openings', (r) => r.openings_count],
+  ['Salary Range', (r) => r.salary_range],
+  ['Salary Min', (r) => r.salary_min],
+  ['Salary Max', (r) => r.salary_max],
+  ['Salary Currency', (r) => r.salary_currency],
+  ['Salary Period', (r) => r.salary_period],
+  ['HR Name', (r) => r.hr_name],
+  ['HR Email', (r) => r.hr_email],
+  ['HR Mobile', (r) => r.hr_mobile],
+  ['HR LinkedIn', (r) => r.hr_linkedin_url],
+  ['Email Status', (r) => r.email_status],
+  ['WhatsApp Status', (r) => r.whatsapp_status],
+  ['Pipeline Stage', (r) => r.pipeline_stage],
+  ['Data Quality', (r) => r.data_quality],
+  ['Source Site', (r) => r.source_site],
+  ['Job URL', (r) => r.job_url],
+  ['Apply URL', (r) => r.apply_url],
+  ['Posted At', (r) => r.posted_at],
+  ['Discovered At', (r) => r.created_at],
+  ['Updated At', (r) => r.updated_at],
+  ['Assigned To', (r) => r.assigned_to],
+  ['Do Not Contact', (r) => (r.do_not_contact ? 'YES' : 'no')],
+  ['Lead ID', (r) => r.id],
+];
+
+const csvCell = (v: unknown) => {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  // Excel evaluates a leading = + @ as a formula; scraped text must not become one.
+  const safe = /^[=+@\t\r]/.test(s) ? `'${s}` : s;
+  return `"${safe.replace(/"/g, '""')}"`;
+};
+
+/** CSV of already-loaded rows, used for an explicit selection. */
+const leadsToCsv = (rows: any[]) => new Blob(
+  ['\ufeff' + [
+    EXPORT_COLUMNS.map(([h]) => `"${h}"`).join(','),
+    ...rows.map((r) => EXPORT_COLUMNS.map(([, get]) => csvCell(get(r))).join(',')),
+  ].join('\r\n')],
+  { type: 'text/csv;charset=utf-8;' },
+);
+
 const ALL_COLUMNS = [
   { id: 'lead_score', label: 'Score' }, { id: 'company_name', label: 'Company' },
   { id: 'job_title', label: 'Job Title' }, { id: 'role', label: 'Role' },
@@ -76,6 +136,17 @@ const Leads: React.FC = () => {
   const pipelineStage = columnFilters.find((f) => f.id === 'pipeline_stage')?.value as string | undefined;
   const sourceSite = columnFilters.find((f) => f.id === 'source_site')?.value as string | undefined;
   const page = pagination.pageIndex + 1;
+
+  // The active filters, in one place so the table query and the export can never
+  // drift -- an export that ignored the current filter would silently hand back a
+  // different set of leads than the user is looking at.
+  const exportParams = {
+    sort_by: sortParam as any, sort_order: sortOrder as any,
+    score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
+    filter: globalFilter || undefined, experience: experienceFilter || undefined,
+    location_type: workplaceFilter || undefined,
+    has_salary: salaryFilter === 'any' ? true : salaryFilter ? Number(salaryFilter) * 100000 : undefined,
+  };
 
   const { data, isLoading, refetch, isFetching, isError, error } = useQuery(
     ['leads', page, pagination.pageSize, sortParam, sortOrder, scoreBand, pipelineStage, sourceSite, globalFilter, experienceFilter, workplaceFilter, salaryFilter],
@@ -150,7 +221,7 @@ const Leads: React.FC = () => {
       downloadBlob(blob, `hiregen-leads-${new Date().toISOString().slice(0, 10)}.xls`);
       toast({ title: 'Workbook downloaded', description: 'All filtered leads, 36 columns', variant: 'success' });
     } catch (e: any) {
-      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: 'destructive' });
+      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: "error" });
     } finally {
       setExporting(false);
     }
