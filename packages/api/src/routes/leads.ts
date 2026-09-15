@@ -105,11 +105,30 @@ function buildLeadFilters(q: any, user: { id: string; role: string }) {
      values.push(q.date_to);
      paramIdx++;
    }
-   if (q.experience) {
-     conditions.push(`jp.experience_level = $${paramIdx}`);
-     values.push(q.experience);
-     paramIdx++;
-   }
+     if (q.experience) {
+       // Exact equality made the UI's "Fresher" option return nothing: stored values
+       // are free text from 48 boards ("0-1 years", "0 to 2 Years", "Experienced,
+       // Fresher"), so 194 rows mentioning fresher matched zero. Map the coarse UI
+       // buckets onto that text; anything unrecognised still falls back to a match.
+       const EXPERIENCE_MATCH: Record<string, string> = {
+         fresher: `(lower(coalesce(jp.experience_level, '')) like '%fresher%'
+                    or lower(coalesce(jp.experience_level, '')) like '%entry level%'
+                    or lower(coalesce(jp.experience_level, '')) like '%entry-level%'
+                    or coalesce(jp.experience_level, '') ~ '^\\s*0(\\s*-|\\s*to)')`,
+         'no-experience': `(lower(coalesce(jp.experience_level, '')) like '%no experience%'
+                           or lower(coalesce(jp.experience_level, '')) like '%fresher%')`,
+         '0-1yr': `coalesce(jp.experience_level, '') ~ '^\\s*0\\s*-\\s*1'`,
+         '0-2yr': `coalesce(jp.experience_level, '') ~ '^\\s*0\\s*(-|\\s*to)\\s*2'`,
+       };
+       const expr = EXPERIENCE_MATCH[q.experience];
+       if (expr) {
+         conditions.push(expr);
+       } else {
+         conditions.push(`lower(coalesce(jp.experience_level, '')) = lower($${paramIdx})`);
+         values.push(q.experience);
+         paramIdx++;
+       }
+     }
    if (q.location_type) {
      conditions.push(`jp.location_type = $${paramIdx}`);
      values.push(q.location_type);
