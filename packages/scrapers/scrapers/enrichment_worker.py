@@ -371,6 +371,131 @@ def _env_vendor_keys() -> dict[str, str]:
     return keys
 
 
+async def run_enrichment_cascade(
+    db_pool, provider, company_name, company_domain, hr_name, hr_linkedin, api_keys,
+) -> tuple[dict[str, Any] | None, str, int, str]:
+    """Vendor + OSINT cascade, deliberately run with NO pooled DB connection held.
+
+    This phase issues outbound calls to crt.sh, search engines and Snov.io, each
+    carrying a 30s timeout. Holding one of ~15 asyncpg pool connections across it
+    let a few slow vendor responses starve every other consumer and stall the whole
+    pipeline, so process_enrichment_job releases the connection before calling this
+    and re-acquires afterwards for the writes.
+
+    Returns (enrichment_result, used_provider, credits_used, status).
+    """
+    enrichment_result: dict[str, Any] | None = None
+    used_provider = "osint_fallback"
+    credits_used = 0
+    status = "success"
+
+    # Cost-aware order (SRS §4.5.4 + operator rule: free first, paid ONLY for
+    # records still missing a contact, and per-record). The cascade runs every
+    # free/public source, then fires the paid email waterfall internally as a
+    # last resort (Tier 4) only if no free tier produced an address.
+    if provider == "auto" or provider in ("osint", "osint_fallback"):
+        enrichment_result = await run_osint_enrichment(
+            db_pool, company_name, hr_name, company_domain, api_keys
+        )
+        used_provider = enrichment_result.get("method") or enrichment_result.get(
+            "source", "osint_fallback")
+        # free tiers -> osint_* ; a per-record paid hit -> paid_<vendor>
+        credits_used = int(enrichment_result.get("paid_credits", 0))
+
+    # Step 1: ContactOut API — only when the cascade found nothing usable AND
+    # a LinkedIn URL is on file (it keys off the profile) AND a key exists.
+    contactout_key_missing = False
+    if (
+        not enrichment_result or not enrichment_result.get("hr_email")
+    ) and provider in ("contactout", "auto"):
+        contactout_key = (
+            api_keys.get("contactout")
+            or os.environ.get("CONTACT_OUT_API_KEY")
+            or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
+            or os.environ.get("ACCONTOUT_API_KEY")
+        )
+        if provider == "contactout" and not contactout_key:
+            contactout_key_missing = True
+        if contactout_key and hr_linkedin:
+            result = await call_contactout(hr_linkedin, contactout_key)
+            if result:
+                enrichment_result = {**(enrichment_result or {}), **result}
+                used_provider = "contactout"
+                credits_used = 1
+                status = "success"
+
+    # Step 2: Snov.io API — final paid fallback if still no email.
+    snovio_key_missing = False
+    if (
+        not enrichment_result or not enrichment_result.get("hr_email")
+    ) and provider in ("snovio", "auto"):
+        snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
+        snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
+        if provider == "snovio" and not snovio_key:
+            snovio_key_missing = True
+        if snovio_key and hr_name and company_name:
+            result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
+            if result:
+                enrichment_result = {**(enrichment_result or {}), **result}
+                used_provider = "snovio"
+                credits_used = 1
+                status = "success"
+
+    # Explicit single-provider override (operator clicked "enrich via X").
+    if provider not in ("auto", "osint", "osint_fallback", "contactout", "snovio"):
+        try:
+            from .utils.email_providers import enrich_via_apollo_io, enrich_via_hunter, enrich_via_lusha, enrich_via_rocketreach, enrich_via_prospeo, enrich_via_findymail
+            _single = {
+                "hunter": enrich_via_hunter, "apollo": enrich_via_apollo_io,
+                "apollo_io": enrich_via_apollo_io, "lusha": enrich_via_lusha,
+                "rocketreach": enrich_via_rocketreach, "prospeo": enrich_via_prospeo,
+                "findymail": enrich_via_findymail,
+            }.get(provider)
+            if _single:
+                r = await _single(hr_name, company_domain, api_keys.get(provider))
+                if r and r.get("hr_email"):
+                    enrichment_result = {**(enrichment_result or {}), **r}
+                    used_provider = provider
+                    credits_used = 1
+                    status = "success"
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"explicit provider {provider} failed: {e}")
+
+    if enrichment_result is None or (
+        not enrichment_result.get("hr_email")
+        and not enrichment_result.get("hr_linkedin_url")
+    ):
+        # Explicit per-row provider choice must be recorded honestly: the
+        # operator chose X and X produced nothing (missing key vs API miss
+        # distinguished so the UI can say "configure a key" vs "no match").
+        if provider not in ("auto", "osint", "osint_fallback"):
+            used_provider = provider
+            key_missing = (
+                (provider == "contactout" and contactout_key_missing)
+                or (provider == "snovio" and snovio_key_missing)
+                or (
+                    provider not in ("contactout", "snovio")
+                    and not api_keys.get(provider)
+                    and not any(
+                        os.environ.get(e) for e in {
+                            "hunter": ["HUNTER_API_KEY"],
+                            "apollo": ["APOLLO_API_KEY"],
+                            "apollo_io": ["APOLLO_API_KEY"],
+                            "lusha": ["LUSHA_API_KEY"],
+                            "rocketreach": ["ROCKETREACH_API_KEY"],
+                            "prospeo": ["PROSPEO_API_KEY"],
+                            "findymail": ["FINDYMAIL_API_KEY"],
+                        }.get(provider, [])
+                    )
+                )
+            )
+            status = "provider_not_configured" if key_missing else "no_match"
+        else:
+            status = "no_match"
+
+    return enrichment_result, used_provider, credits_used, status
+
+
 async def process_enrichment_job(
     payload: dict[str, Any],
     redis_client: redis.Redis,
@@ -429,115 +554,13 @@ async def process_enrichment_job(
         from .utils.job_keys import resolve_job_user
         user_id, api_keys = await resolve_job_user(conn, requested_by)
 
-        enrichment_result: dict[str, Any] | None = None
-        used_provider = "osint_fallback"
-        credits_used = 0
-        status = "success"
+    # Connection released at the end of the read block above; the cascade makes
+    # no use of it, and the write block below re-acquires.
+    enrichment_result, used_provider, credits_used, status = await run_enrichment_cascade(
+        db_pool, provider, company_name, company_domain, hr_name, hr_linkedin, api_keys,
+    )
 
-        # Cost-aware order (SRS §4.5.4 + operator rule: free first, paid ONLY for
-        # records still missing a contact, and per-record). The cascade runs every
-        # free/public source, then fires the paid email waterfall internally as a
-        # last resort (Tier 4) only if no free tier produced an address.
-        if provider == "auto" or provider in ("osint", "osint_fallback"):
-            enrichment_result = await run_osint_enrichment(
-                db_pool, company_name, hr_name, company_domain, api_keys
-            )
-            used_provider = enrichment_result.get("method") or enrichment_result.get(
-                "source", "osint_fallback")
-            # free tiers -> osint_* ; a per-record paid hit -> paid_<vendor>
-            credits_used = int(enrichment_result.get("paid_credits", 0))
-
-        # Step 1: ContactOut API — only when the cascade found nothing usable AND
-        # a LinkedIn URL is on file (it keys off the profile) AND a key exists.
-        contactout_key_missing = False
-        if (
-            not enrichment_result or not enrichment_result.get("hr_email")
-        ) and provider in ("contactout", "auto"):
-            contactout_key = (
-                api_keys.get("contactout")
-                or os.environ.get("CONTACT_OUT_API_KEY")
-                or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
-                or os.environ.get("ACCONTOUT_API_KEY")
-            )
-            if provider == "contactout" and not contactout_key:
-                contactout_key_missing = True
-            if contactout_key and hr_linkedin:
-                result = await call_contactout(hr_linkedin, contactout_key)
-                if result:
-                    enrichment_result = {**(enrichment_result or {}), **result}
-                    used_provider = "contactout"
-                    credits_used = 1
-                    status = "success"
-
-        # Step 2: Snov.io API — final paid fallback if still no email.
-        snovio_key_missing = False
-        if (
-            not enrichment_result or not enrichment_result.get("hr_email")
-        ) and provider in ("snovio", "auto"):
-            snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
-            snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
-            if provider == "snovio" and not snovio_key:
-                snovio_key_missing = True
-            if snovio_key and hr_name and company_name:
-                result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
-                if result:
-                    enrichment_result = {**(enrichment_result or {}), **result}
-                    used_provider = "snovio"
-                    credits_used = 1
-                    status = "success"
-
-        # Explicit single-provider override (operator clicked "enrich via X").
-        if provider not in ("auto", "osint", "osint_fallback", "contactout", "snovio"):
-            try:
-                from .utils.email_providers import enrich_via_apollo_io, enrich_via_hunter, enrich_via_lusha, enrich_via_rocketreach, enrich_via_prospeo, enrich_via_findymail
-                _single = {
-                    "hunter": enrich_via_hunter, "apollo": enrich_via_apollo_io,
-                    "apollo_io": enrich_via_apollo_io, "lusha": enrich_via_lusha,
-                    "rocketreach": enrich_via_rocketreach, "prospeo": enrich_via_prospeo,
-                    "findymail": enrich_via_findymail,
-                }.get(provider)
-                if _single:
-                    r = await _single(hr_name, company_domain, api_keys.get(provider))
-                    if r and r.get("hr_email"):
-                        enrichment_result = {**(enrichment_result or {}), **r}
-                        used_provider = provider
-                        credits_used = 1
-                        status = "success"
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"explicit provider {provider} failed: {e}")
-
-        if enrichment_result is None or (
-            not enrichment_result.get("hr_email")
-            and not enrichment_result.get("hr_linkedin_url")
-        ):
-            # Explicit per-row provider choice must be recorded honestly: the
-            # operator chose X and X produced nothing (missing key vs API miss
-            # distinguished so the UI can say "configure a key" vs "no match").
-            if provider not in ("auto", "osint", "osint_fallback"):
-                used_provider = provider
-                key_missing = (
-                    (provider == "contactout" and contactout_key_missing)
-                    or (provider == "snovio" and snovio_key_missing)
-                    or (
-                        provider not in ("contactout", "snovio")
-                        and not api_keys.get(provider)
-                        and not any(
-                            os.environ.get(e) for e in {
-                                "hunter": ["HUNTER_API_KEY"],
-                                "apollo": ["APOLLO_API_KEY"],
-                                "apollo_io": ["APOLLO_API_KEY"],
-                                "lusha": ["LUSHA_API_KEY"],
-                                "rocketreach": ["ROCKETREACH_API_KEY"],
-                                "prospeo": ["PROSPEO_API_KEY"],
-                                "findymail": ["FINDYMAIL_API_KEY"],
-                            }.get(provider, [])
-                        )
-                    )
-                )
-                status = "provider_not_configured" if key_missing else "no_match"
-            else:
-                status = "no_match"
-
+    async with db_pool.acquire() as conn:
         # Update enrichment_log
         await conn.execute(
             """
