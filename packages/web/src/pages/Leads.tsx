@@ -132,7 +132,26 @@ const Leads: React.FC = () => {
   const [density, setDensity] = useState<Density>('comfortable');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const sortParam = sorting.length > 0 ? sorting[0].id : 'created_at';
+  // Column ids and the API's sort enum are different namespaces: several columns are
+  // display composites (salary_range renders text but the sortable value is a numeric
+  // bound). Sending an unmapped id made the API answer 400 and the table rendered
+  // "Error loading leads" with no rows -- a header click blanking the page. Anything
+  // not in the enum or the map falls back to created_at instead of erroring.
+  const SORTABLE_COLUMNS = new Set([
+    'lead_score', 'created_at', 'updated_at', 'company_name', 'job_title',
+    'source_site', 'hr_name', 'location_type', 'salary_min', 'salary_max', 'posted_at',
+    'pipeline_stage', 'data_quality', 'employment_type', 'department',
+  ]);
+  const SORT_ALIASES: Record<string, string> = {
+    salary_range: 'salary_min',
+    location: 'location_type',
+    stage: 'pipeline_stage',
+    role: 'job_title',
+    posting_link: 'posted_at',
+  };
+  const requestedSort = sorting.length > 0 ? sorting[0].id : 'created_at';
+  const mappedSort = SORT_ALIASES[requestedSort] ?? requestedSort;
+  const sortParam = SORTABLE_COLUMNS.has(mappedSort) ? mappedSort : 'created_at';
   const sortOrder = sorting.length > 0 ? (sorting[0].desc ? 'desc' : 'asc') : 'desc';
   const scoreBand = columnFilters.find((f) => f.id === 'score_band')?.value as string | undefined;
   const pipelineStage = columnFilters.find((f) => f.id === 'pipeline_stage')?.value as string | undefined;
@@ -287,6 +306,9 @@ const Leads: React.FC = () => {
         </div>
       );
     } }),
+    // Sorting this column asks the API for salary_min (see SORT_ALIASES): ordering a
+    // free-text band like "2-3 LPA" lexicographically is meaningless, and the raw id
+    // is not in the sort enum -- sending it returned 400 and blanked the table.
     columnHelper.accessor('salary_range', { header: 'Salary', cell: (info) => {
       const l = info.row.original;
       const text = info.getValue();
@@ -424,7 +446,13 @@ const Leads: React.FC = () => {
                     const canSort = header.column.getCanSort();
                     const active = header.column.getIsSorted();
                     return (
-                      <th key={header.id} onClick={canSort ? header.column.getToggleSortingHandler() : undefined} style={{ width: header.getSize() }} className={`table-th sticky top-0 bg-surface/90 backdrop-blur-xl ${canSort ? 'cursor-pointer select-none hover:text-foreground' : ''}`}>
+                      <th key={header.id} onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
+                          aria-sort={!canSort ? undefined : active === 'asc' ? 'ascending' : active === 'desc' ? 'descending' : 'none'}
+                          tabIndex={canSort ? 0 : undefined}
+                          role={canSort ? 'button' : undefined}
+                          onKeyDown={canSort ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); header.column.getToggleSortingHandler()?.(e); }
+                          } : undefined} style={{ width: header.getSize() }} className={`table-th sticky top-0 bg-surface/90 backdrop-blur-xl ${canSort ? 'cursor-pointer select-none hover:text-foreground' : ''}`}>
                         <span className="inline-flex items-center gap-1">
                           {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
                           {canSort && <span className="inline-flex flex-col">{active === 'asc' ? <ChevronUp className="h-3 w-3 text-primary" /> : active === 'desc' ? <ChevronDown className="h-3 w-3 text-primary" /> : <ChevronUp className="h-3 w-3 opacity-30" />}</span>}

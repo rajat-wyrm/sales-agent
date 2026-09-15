@@ -657,11 +657,24 @@ def _parse_salary_bounds(raw: dict[str, Any], salary_range: str) -> tuple[float 
             mult = 10_000_000.0
         elif re.search(r"\bp\.?a\.?\b|annum|/year|per year", low_txt):
             mult = 12.0 if re.search(r"month", low_txt) else 1.0
+        # Bare "₹12 - ₹15" carries no unit, but Indian boards mean lakhs-per-annum:
+        # stored literally it becomes twelve rupees a year, which then sorts among
+        # real salaries and corrupts any salary-ordered list. Only applied when no
+        # explicit unit was found above, so "LPA"/"per month" keep their own scale.
+        if (mult == 1.0 and nums and max(nums) <= 500
+                and re.search(r"\u20b9|\brs\.?\b", txt, re.I)):
+            mult = 100_000.0
         if nums:
             if lo is None:
                 lo = nums[0] * mult
             if hi is None:
                 hi = (nums[-1] if len(nums) > 1 else nums[0]) * mult
+        # Same plausibility floor as the anchored scan: an unanchored number pair can
+        # land on a duration or an index, and inventing pay is worse than none.
+        # Rejected as a PAIR -- keeping only the upper bound of "0-1 LPA" would show a
+        # salary with no minimum, which sorts and filters wrongly in both directions.
+        if (lo is not None and lo < 1_000) or (hi is not None and hi < 1_000):
+            lo = hi = None
         if currency is None:
             if "₹" in txt or re.search(r"\brs\.?\b", txt, re.I):
                 currency = "INR"

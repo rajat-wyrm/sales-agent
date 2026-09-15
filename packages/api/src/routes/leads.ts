@@ -13,7 +13,10 @@ const paginationSchema = z.object({
   page: z.coerce.number().min(1).default(1),
   limit: z.coerce.number().min(1).max(200).default(50),
   sort_by: z.enum(['lead_score', 'created_at', 'updated_at', 'company_name', 'job_title', 'source_site',
-    'hr_name', 'location_type', 'salary_min', 'salary_max', 'posted_at']).default('created_at'),
+    'hr_name', 'location_type', 'salary_min', 'salary_max', 'posted_at',
+    // Sorting by pipeline_stage was requested by the UI and rejected; it is a plain
+    // column on leads, so there was no reason to omit it.
+    'pipeline_stage', 'data_quality', 'employment_type', 'department']).default('created_at'),
   sort_order: z.enum(['asc', 'desc']).default('desc'),
   score_band: z.enum(['hot', 'warm', 'cold']).optional(),
   pipeline_stage: z
@@ -313,6 +316,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       // interpolated directly, so ORDER BY cannot be injected. NULLS placement is
       // appended after the direction (see nullsTail), not here.
       location_type: 'jp.location_type',
+      pipeline_stage: 'l.pipeline_stage',
+      data_quality: 'l.data_quality',
+      employment_type: 'jp.employment_type',
+      department: 'jp.department',
       salary_min: 'jp.salary_min',
       salary_max: 'jp.salary_max',
       posted_at: 'jp.posted_at',
@@ -321,9 +328,12 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
     const sortColumn = sortColumns[q.sort_by] || 'l.created_at';
     // Nullable facets must push NULLs last in DESC (and first in ASC) or the
     // default Postgres ordering makes "highest salary" return rows with no pay.
-    const nullsTail = ['salary_min', 'salary_max', 'posted_at'].includes(q.sort_by)
-      ? (q.sort_order === 'desc' ? ' NULLS LAST' : ' NULLS FIRST')
-      : '';
+    // Sparse facets always sort NULLs last, in BOTH directions. The previous
+    // direction-dependent rule meant clicking Salary to get "cheapest first" opened
+    // with 25 rows that have no salary at all -- the column looked empty and broken.
+    // A user sorting by a facet wants populated values first either way.
+    const SPARSE_SORT_COLUMNS = ['salary_min', 'salary_max', 'posted_at', 'employment_type', 'department'];
+    const nullsTail = SPARSE_SORT_COLUMNS.includes(q.sort_by) ? ' NULLS LAST' : '';
 
     const countQuery = `
       SELECT COUNT(*) as total
