@@ -130,6 +130,13 @@ class OffCampusAggregatorsScraper(BaseScraper):
     rate_limit_seconds = 2.0
 
     async def _get(self, session, url: str, max_bytes: int = 1_000_000) -> str | None:
+        # Sitemap child URLs and apply links are parsed out of fetched HTML, so they
+        # are attacker-influenced; this raw-aiohttp path bypasses http_client.fetch.
+        from scrapers.utils.http_client import assert_public_http_url
+        try:
+            url = assert_public_http_url(url)
+        except ValueError:
+            return None
         try:
             async with session.get(url, headers=UA, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:

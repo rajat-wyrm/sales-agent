@@ -35,11 +35,12 @@ import json
 import logging
 import os
 import random
+import ipaddress
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, urlsplit
 
 logger = logging.getLogger("scraper.http")
 # Keep full request URLs (which carry API keys for the query-auth vendors and the
@@ -287,6 +288,77 @@ class Response:
 
 
 # ---------------------------------------------------------------------------
+# SSRF guard for URLs that come from UNTRUSTED input.
+#
+# Scrapers fetch job URLs, career-page links and domains lifted from scraped HTML,
+# so "is it http(s)?" is not enough: that check passes the cloud metadata endpoint
+# (http://169.254.169.254/latest/meta-data/iam/security-credentials/), our own
+# Redis/Postgres on localhost, and user:pass@host credential smuggling. Ported from
+# Agent Reach's normalize_public_http_url(), which covers all of those.
+# ---------------------------------------------------------------------------
+
+_BLOCKED_FETCH_HOSTS = frozenset({
+    "localhost", "metadata", "metadata.google.internal", "ip6-localhost",
+    "instance-data", "ec2internal",
+})
+_BLOCKED_FETCH_SUFFIXES = (".local", ".internal", ".localhost", ".localdomain", ".home.arpa")
+
+# RFC1918 + loopback + link-local + CGNAT + multicast. Anything in here means the
+# target is not public, whatever its hostname looks like after DNS-free parsing.
+_PRIVATE_NETS = [
+    ipaddress.ip_network(n) for n in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+        "169.254.0.0/16", "0.0.0.0/8", "100.64.0.0/10", "224.0.0.0/4",
+        "240.0.0.0/4", "::1/128", "fe80::/10", "fc00::/7",
+    )
+]
+
+
+def assert_public_http_url(url: str) -> str:
+    """Return a normalised URL, or raise if it is not clearly public HTTP(S).
+
+    Rejects: non-http schemes, credentials in the authority, IP literals that are
+    private/reserved/loopback/link-local, single-label hosts (cluster DNS such as
+    `http://redis:6379`), *.internal/.local style names, control characters and
+    CR/LF, which would otherwise let a scraped string inject an extra header.
+    """
+    candidate = str(url or "").strip()
+    if not candidate or chr(92) in candidate:   # backslash: path-confusion trick
+        raise ValueError("only public http(s) URLs are allowed")
+    # Any whitespace or control char is disallowed outright: a scraped
+    # "https://x/a\r\nX-Injected: 1" would otherwise split into a second header.
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in candidate):
+        raise ValueError("only public http(s) URLs are allowed")
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        _ = parsed.port          # raises on an out-of-range/malformed port
+    except (TypeError, ValueError):
+        raise ValueError("only public http(s) URLs are allowed") from None
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError("only public http(s) URLs are allowed")
+    if not host or parsed.username is not None or parsed.password is not None:
+        raise ValueError("only public http(s) URLs are allowed")
+    if "%" in host:               # percent-encoded / IPv6 zone id tricks
+        raise ValueError("only public http(s) URLs are allowed")
+    if host in _BLOCKED_FETCH_HOSTS or host.endswith(_BLOCKED_FETCH_SUFFIXES):
+        raise ValueError("only public http(s) URLs are allowed")
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
+            raise ValueError(f"refusing to fetch non-public address {host}")
+    elif "." not in host:
+        # Bare service name inside the docker network (redis, postgres, reacher).
+        raise ValueError("only public http(s) URLs are allowed")
+    return parsed.geturl()
+
+
+# ---------------------------------------------------------------------------
 # Per-domain politeness (adapted from the HireGen stealth client, ported into
 # this module rather than added as a parallel one -- fetch() is already the sole
 # HTTP chokepoint for all 48 scrapers, so throttling belongs here).
@@ -393,11 +465,9 @@ async def fetch(url: str, *, timeout: int = 20, headers: Optional[dict] = None,
     because a page looked blocked — the caller decides).
     """
     ranks = {"httpx": 0, "curl": 1, "playwright": 2}
-    # Never fetch non-web schemes; a redirect-following generic client handed a
-    # file://gopher:// URL would be an SSRF footgun. All call sites are https
-    # today; this guards future ones.
-    if not url.lower().startswith(("http://", "https://")):
-        raise ValueError(f"refusing to fetch non-http(s) URL: {url!r}")
+    # Job URLs, career pages and domains arrive from scraped HTML, i.e. attacker-
+    # influenced. Validate at the one chokepoint every tier passes through.
+    url = assert_public_http_url(url)
     lo = ranks.get(min_engine, 0)
     hi = ranks.get(max_engine, 2)
     order = [e for i, e in enumerate(["httpx", "curl", "playwright"]) if lo <= i <= hi]

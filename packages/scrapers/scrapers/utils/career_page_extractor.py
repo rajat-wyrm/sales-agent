@@ -76,6 +76,14 @@ GENERIC_LOCAL_PARTS = {
 
 async def fetch_page(url: str, session=None, timeout: int = 15) -> str | None:
     """Fetch a web page and return its HTML content."""
+    from scrapers.utils.http_client import assert_public_http_url
+
+    # Career-page URLs are derived from scraped company domains, so they are
+    # attacker-influenced; this raw-aiohttp path bypasses http_client.fetch's guard.
+    try:
+        url = assert_public_http_url(url)
+    except ValueError:
+        return None
     import aiohttp
 
     headers = {

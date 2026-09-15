@@ -27,6 +27,8 @@ DORK_TIMEOUT = 15.0
 
 import aiohttp
 
+from scrapers.utils.http_client import assert_public_http_url
+
 # Import sophisticated career page extractor
 from scrapers.utils.career_page_extractor import extract_from_career_page
 
@@ -113,6 +115,12 @@ _HEADERS = {
 
 
 async def _fetch_text(session: aiohttp.ClientSession, url: str, timeout: int = 6) -> str | None:
+    # URLs here come from scraped HTML and derived domains, so validate before the
+    # raw aiohttp call (this path bypasses http_client.fetch's own guard).
+    try:
+        url = assert_public_http_url(url)
+    except ValueError:
+        return None
     try:
         async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             if resp.status == 200:
