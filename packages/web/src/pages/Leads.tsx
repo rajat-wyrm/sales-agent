@@ -318,7 +318,9 @@ const Leads: React.FC = () => {
       return <div className="flex flex-wrap gap-1.5">{em && <Badge className={em.className}>{em.label}</Badge>}{wm && <Badge className={wm.className}>{wm.label}</Badge>}</div>;
     } }),
     columnHelper.display({ id: 'stage', header: 'Stage', cell: ({ row }) => { const meta = stageMeta(row.original.pipeline_stage); return <Badge className={meta.className}><span className="capitalize">{meta.label}</span></Badge>; } }),
-    columnHelper.accessor('source_site', { header: 'Source', cell: (info) => <span className="text-[13px] capitalize text-muted-foreground">{info.getValue() || '—'}</span> }),
+    // Hostnames must keep their own casing: CSS capitalize turned timesjobs.com into
+    // "Timesjobs.Com", which reads as a different brand than the one on the posting.
+    columnHelper.accessor('source_site', { header: 'Source', cell: (info) => <span className="text-[13px] text-muted-foreground">{info.getValue() || '—'}</span> }),
     columnHelper.accessor('posted_at', { header: 'Posted', cell: (info) => <span className="whitespace-nowrap text-[13px] text-muted-foreground">{info.getValue() ? formatDate(info.getValue()) : '—'}</span> }),
     columnHelper.display({ id: 'posting_link', header: 'Apply Link', cell: ({ row }) => {
       const l = row.original;
