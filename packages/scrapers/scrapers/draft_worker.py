@@ -44,14 +44,14 @@ I'd love to show you how we can save you time and improve your hiring quality.
 Would you be open to a 10-minute call this week?
 
 Best regards,
-HireGen Team
+{sender_name}
 
 Job posting: {job_url}
 """
 
 WHATSAPP_TEMPLATE = """Hi {name}, 
 
-This is [Your Name] from HireGen. We help {company_name} find top fresher talent for roles like {job_title}. 
+This is {sender_name} from HireGen. We help {company_name} find top fresher talent for roles like {job_title}. 
 
 Our AI platform pre-screens and verifies entry-level candidates, saving you hours of sourcing.
 
@@ -61,6 +61,24 @@ Thanks!
 """
 
 SUBJECT_TEMPLATE = "{company_name} x HireGen — Fresher Talent for {job_title}"
+
+
+DEFAULT_SENDER_NAME = "HireGen Team"
+
+
+def resolve_sender_name(lead_data: dict[str, Any]) -> str:
+    """Who the message signs as.
+
+    A template must never ship a literal "[Your Name]" -- 25 stored drafts carried it,
+    and it reads as a broken email to a recruiter. The sender's real name comes from
+    their account; if none is set we sign as the team, which is complete English rather
+    than an unfilled placeholder.
+    """
+    for key in ("sender_name", "assigned_to_name", "user_full_name"):
+        v = (lead_data.get(key) or "").strip()
+        if v:
+            return v
+    return DEFAULT_SENDER_NAME
 
 
 def generate_template_draft(lead_data: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +101,7 @@ def generate_template_draft(lead_data: dict[str, Any]) -> dict[str, Any]:
         job_title=job_title,
         experience_clause=experience_clause,
         job_url=job_url if job_url else "N/A",
+        sender_name=resolve_sender_name(lead_data),
     )
 
     subject = SUBJECT_TEMPLATE.format(
@@ -94,6 +113,7 @@ def generate_template_draft(lead_data: dict[str, Any]) -> dict[str, Any]:
         name=hr_display,
         company_name=company_name,
         job_title=job_title,
+        sender_name=resolve_sender_name(lead_data),
     )
 
     return {
@@ -181,11 +201,13 @@ async def process_draft_job(
                    -- two things a recruiter actually cares about, and were absent.
                    jp.location, jp.city, jp.state, jp.country, jp.location_type,
                    jp.department, jp.openings_count, jp.posted_at::text as posted_at,
-                   hc.full_name as hr_name, hc.linkedin_url
+                   hc.full_name as hr_name, hc.linkedin_url,
+                   au.email as assigned_to_email
             FROM leads l
             JOIN companies c ON l.company_id = c.id
             JOIN job_postings jp ON l.job_posting_id = jp.id
             LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+            LEFT JOIN users au ON au.id = l.assigned_to
             WHERE l.id = $1
             """,
             lead_id,
@@ -248,6 +270,12 @@ async def process_draft_job(
             "openings_count": lead["openings_count"],
             "posted_at": lead["posted_at"] or "",
         }
+
+        # Sign as whoever owns the lead. users has no display-name column, so the
+        # email local-part is the only real identity available; without an assignee
+        # we fall back to the team signature rather than a bracketed placeholder.
+        if lead.get("assigned_to_email"):
+            lead_data["sender_name"] = lead["assigned_to_email"].split("@")[0].replace(".", " ").title()
 
         # Try Gemini first
         gemini_key = os.environ.get("GEMINI_API_KEY")
