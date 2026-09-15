@@ -16,7 +16,24 @@ const registerSchema = z.object({
 });
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.post('/login', async (req, reply) => {
+  // The global limiter is 100/min for every route, which leaves ~100 password guesses
+  // per minute here. Login and refresh are the only unauthenticated credential checks,
+  // so they get their own much tighter budget.
+  const AUTH_RATE_LIMIT = {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+        errorResponseBuilder: () => ({
+          statusCode: 429,
+          error: 'Too many attempts',
+          message: 'Too many authentication attempts. Try again in a minute.',
+        }),
+      },
+    },
+  };
+
+  fastify.post('/login', AUTH_RATE_LIMIT, async (req, reply) => {
     const parseResult = loginSchema.safeParse(req.body);
     if (!parseResult.success) {
       return reply.status(400).send({ error: 'Invalid credentials' });
@@ -64,7 +81,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
-  fastify.post('/register', async (req, reply) => {
+  fastify.post('/register', AUTH_RATE_LIMIT, async (req, reply) => {
     const parseResult = registerSchema.safeParse(req.body);
     if (!parseResult.success) {
       return reply.status(400).send({ error: 'Invalid input', details: parseResult.error.issues });
@@ -108,7 +125,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     return { message: 'Logged out' };
   });
 
-  fastify.post('/refresh', async (req, reply) => {
+  fastify.post('/refresh', AUTH_RATE_LIMIT, async (req, reply) => {
     const bodySchema = z.object({
       refresh_token: z.string().min(1),
     });

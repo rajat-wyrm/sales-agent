@@ -3,16 +3,40 @@ import { config } from 'dotenv';
 
 config();
 
+// Values shipped in .env.example. If one of these survives into a production
+// deployment, tokens can be forged by anyone who reads the public repository -- the
+// schema's min(1) would happily accept them, so they have to be refused by name.
+const PLACEHOLDER_SECRETS = new Set([
+  'change-this-to-a-long-random-string',
+  'change-me',
+  'changeme',
+  'secret',
+  'your-secret-here',
+  'replace-me',
+  'dev-secret',
+]);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.string().transform(Number).default('3000'),
   HOST: z.string().optional(),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
-  JWT_SECRET: z.string().min(1),
+  JWT_SECRET: z
+    .string()
+    .min(32, 'JWT_SECRET must be at least 32 characters')
+    .refine((v) => !PLACEHOLDER_SECRETS.has(v.trim().toLowerCase()), {
+      message:
+        'JWT_SECRET is still the .env.example placeholder; anyone with the public repo could forge admin tokens',
+    }),
   JWT_EXPIRES_IN: z.string().default('7d'),
   CORS_ORIGIN: z.string().optional(),
-  ENCRYPTION_SECRET: z.string().min(32),
+  ENCRYPTION_SECRET: z
+    .string()
+    .min(32)
+    .refine((v) => !PLACEHOLDER_SECRETS.has(v.trim().toLowerCase()), {
+      message: 'ENCRYPTION_SECRET is still the .env.example placeholder',
+    }),
   GEMINI_API_KEY: z.string().optional(),
   SNOVIO_API_KEY: z.string().optional(),
   SNOVIO_API_SECRET: z.string().optional(),

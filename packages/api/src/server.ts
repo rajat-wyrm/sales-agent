@@ -21,8 +21,12 @@ const server = async () => {
       : { level: 'warn', redact: ['req.headers.authorization'] },
   });
 
+  // `origin: '*'` alongside credentials:true is the classic CORS mistake: browsers
+  // reject it outright, and any deployment that loosened the response would let an
+  // attacker's page read authenticated responses. With no explicit origin configured
+  // we send no CORS headers at all, which is correct for the same-origin docker setup.
   await app.register(Cors, {
-    origin: env.CORS_ORIGIN || '*',
+    origin: env.CORS_ORIGIN ? env.CORS_ORIGIN.split(',').map((o) => o.trim()) : false,
     credentials: true,
   });
   await app.register(Helmet);
