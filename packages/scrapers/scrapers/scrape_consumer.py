@@ -231,15 +231,18 @@ async def consume_scrape_queue(
                         """
                         INSERT INTO scrape_runs
                           (id, started_at, finished_at, sources_attempted,
-                           sources_succeeded, sources_circuit_broken, leads_found, leads_deduped, errors)
-                        VALUES ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+                           sources_succeeded, sources_circuit_broken, leads_found, errors)
+                        VALUES ($1, NOW(), NOW(), $2, $3, $4, $5, $6)
                         """,
                         run_id,
                         results["sources_attempted"],
                         results["sources_succeeded"],
                         [f["source"] for f in results["sources_failed"]],
                         results["leads_found"],
-                        0,
+                        # leads_deduped intentionally omitted: dedupe happens later in the
+                        # normalizer consumer, so this writer cannot know it. It used to insert a
+                        # literal 0, which made every run claim "0 duplicates" -- an unwritten
+                        # number presented as fact. NULL now reads as unknown.
                         json.dumps({
                             "sources": sources,
                             "run_type": run_type,

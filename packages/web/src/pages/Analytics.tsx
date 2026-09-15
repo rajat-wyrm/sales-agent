@@ -256,7 +256,7 @@ const Analytics: React.FC = () => {
                     <th className="table-th">Attempted</th>
                     <th className="table-th">Succeeded</th>
                     <th className="table-th">Leads Found</th>
-                    <th className="table-th">New</th>
+                    <th className="table-th" title="Duplicates suppressed during ingest. NULL means this pipeline stage cannot know -- dedupe runs later, in the normalizer consumer.">Deduped</th>
                     <th className="table-th">Started</th>
                     <th className="table-th">Finished</th>
                     <th className="table-th">Circuit Broken</th>
@@ -270,7 +270,12 @@ const Analytics: React.FC = () => {
                       <td className="table-td tabular-nums">{run.sources_attempted}</td>
                       <td className="table-td tabular-nums">{run.sources_succeeded}</td>
                       <td className="table-td tabular-nums font-medium">{run.leads_found}</td>
-                      <td className="table-td tabular-nums">{run.leads_deduped}</td>
+                      {/* NULL means this writer could not know (dedupe happens in a
+                          later consumer), which is different from a real 0. Showing 0
+                          claimed every run had no duplicates, which was false. */}
+                      <td className="table-td tabular-nums" title={run.leads_deduped == null ? 'Not tracked for this stage of the pipeline' : undefined}>
+                        {run.leads_deduped ?? '—'}
+                      </td>
                       <td className="table-td text-xs text-muted-foreground">{formatDateTime(run.started_at)}</td>
                       <td className="table-td text-xs text-muted-foreground">
                         {run.finished_at ? formatDateTime(run.finished_at) : '—'}
