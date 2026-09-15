@@ -43,9 +43,12 @@ const ENRICH_PROVIDERS = [
 
 const ALL_COLUMNS = [
   { id: 'lead_score', label: 'Score' }, { id: 'company_name', label: 'Company' },
-  { id: 'job_title', label: 'Job Title' }, { id: 'hr_name', label: 'HR Contact' },
+  { id: 'job_title', label: 'Job Title' }, { id: 'role', label: 'Role' },
+  { id: 'location', label: 'Location' }, { id: 'salary', label: 'Salary' },
+  { id: 'hr_name', label: 'HR Contact' },
   { id: 'verification', label: 'Verification' }, { id: 'stage', label: 'Stage' },
-  { id: 'source_site', label: 'Source' }, { id: 'created_at', label: 'Discovered' },
+  { id: 'source_site', label: 'Source' }, { id: 'posted_at', label: 'Posted' },
+  { id: 'created_at', label: 'Discovered' }, { id: 'posting_link', label: 'Apply Link' },
 ];
 
 const Leads: React.FC = () => {
@@ -156,24 +159,52 @@ const Leads: React.FC = () => {
     columnHelper.accessor('job_title', { header: 'Job Title', cell: (info) => <span className="line-clamp-1 text-muted-foreground">{info.getValue() || info.row.original.source_site || '—'}</span> }),
     // Location + salary + experience were never surfaced in the table even after
     // scraping them, so reps had to open each lead to tell if a role was worth
-    // working. Rendered compactly; blank rather than a fake placeholder.
+    // working. Each facet gets its own column so it can be sorted, toggled and
+    // read at a glance; blank rather than a fake placeholder when absent.
     columnHelper.display({ id: 'role', header: 'Role', cell: ({ row }) => {
       const l = row.original;
-      const loc = [l.city, l.state].filter(Boolean).join(', ') || l.location;
       return (
         <div className="min-w-0 space-y-1">
+          {l.experience_level && <p className="truncate text-[12px] text-muted-foreground">{l.experience_level}</p>}
+          {l.department && <p className="truncate text-[11px] text-muted-foreground">{l.department}</p>}
+          {(l.openings_count ?? 0) > 1 && <p className="truncate text-[11px] text-muted-foreground">{l.openings_count} openings</p>}
+          {!l.experience_level && !l.department && !(l.openings_count! > 1) && <span className="text-[12px] text-muted-foreground">—</span>}
+        </div>
+      );
+    } }),
+    columnHelper.display({ id: 'location', header: 'Location', cell: ({ row }) => {
+      const l = row.original;
+      const loc = [l.city, l.state].filter(Boolean).join(', ') || l.location || '';
+      // Workplace and employment type are separate facets; sources provide either,
+      // so show whichever is present rather than a dash.
+      const mode = l.location_type || (l.is_work_from_home ? 'remote' : '');
+      return (
+        <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
             <MapPin className="h-3 w-3 shrink-0" />
-            <span className="truncate">{loc || '—'}</span>
-            {l.location_type && <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px] capitalize">{l.location_type}</Badge>}
+            <span className="truncate">{loc || mode || '—'}</span>
           </div>
-          {l.experience_level && <p className="truncate text-[11px] text-muted-foreground">{l.experience_level}</p>}
+          {/* Only the facets the location line does not already show, so a city is
+              never glued straight onto "remote" with no separator. */}
+          {(() => {
+            const extra = [mode && mode !== loc ? mode : null, l.employment_type, l.country]
+              .filter(Boolean).join(' \u00b7 ');
+            return extra ? <p className="truncate pl-[18px] text-[11px] capitalize text-muted-foreground/80">{extra}</p> : null;
+          })()}
         </div>
       );
     } }),
     columnHelper.accessor('salary_range', { header: 'Salary', cell: (info) => {
-      const v = info.getValue();
-      return v ? <span className="whitespace-nowrap text-[12px] font-medium text-success">{v}</span> : <span className="text-[12px] text-muted-foreground">—</span>;
+      const l = info.row.original;
+      const text = info.getValue();
+      if (text) return <span className="whitespace-nowrap text-[12px] font-medium text-success">{text}</span>;
+      // Many sources only give structured bounds; render those instead of a dash.
+      const fmt = (n: any) => n == null ? null : Math.round(Number(n)).toLocaleString('en-IN');
+      const lo = fmt(l.salary_min), hi = fmt(l.salary_max);
+      if (!lo && !hi) return <span className="text-[12px] text-muted-foreground">—</span>;
+      const cur = l.salary_currency === 'INR' || !l.salary_currency ? '₹' : `${l.salary_currency} `;
+      const span = lo && hi && lo !== hi ? `${cur}${lo}-${hi}` : `${cur}${lo || hi}`;
+      return <span className="whitespace-nowrap text-[12px] font-medium text-success">{span}{l.salary_period ? <span className="text-muted-foreground">/{l.salary_period === 'year' ? 'yr' : 'mo'}</span> : null}</span>;
     } }),
     columnHelper.accessor('hr_name', { header: 'HR Contact', cell: (info) => {
       const lead = info.row.original;
@@ -187,6 +218,17 @@ const Leads: React.FC = () => {
     } }),
     columnHelper.display({ id: 'stage', header: 'Stage', cell: ({ row }) => { const meta = stageMeta(row.original.pipeline_stage); return <Badge className={meta.className}><span className="capitalize">{meta.label}</span></Badge>; } }),
     columnHelper.accessor('source_site', { header: 'Source', cell: (info) => <span className="text-[13px] capitalize text-muted-foreground">{info.getValue() || '—'}</span> }),
+    columnHelper.accessor('posted_at', { header: 'Posted', cell: (info) => <span className="whitespace-nowrap text-[13px] text-muted-foreground">{info.getValue() ? formatDate(info.getValue()) : '—'}</span> }),
+    columnHelper.display({ id: 'posting_link', header: 'Apply Link', cell: ({ row }) => {
+      const l = row.original;
+      const url = l.apply_url || l.job_url;
+      return url ? (
+        <a href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+           title={url} className="inline-flex items-center gap-1 text-[12px] text-info hover:underline">
+          <ExternalLink className="h-3.5 w-3.5" />Open
+        </a>
+      ) : <span className="text-[12px] text-muted-foreground">—</span>;
+    } }),
     columnHelper.accessor('created_at', { header: 'Discovered', cell: (info) => <span className="text-[13px] text-muted-foreground">{formatDate(info.getValue())}</span> }),
     columnHelper.display({ id: 'actions', header: () => <MoreVertical className="h-4 w-4 text-muted-foreground" />, cell: ({ row }) => {
       const lead = row.original;
@@ -307,8 +349,8 @@ const Leads: React.FC = () => {
                           <td colSpan={columns.length} className="border-b border-border p-0">
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.25 }} className="overflow-hidden">
                               <div className="grid grid-cols-1 gap-4 bg-muted/30 px-6 py-4 md:grid-cols-3">
-                                <DetailBlock title="Contact"><KV k="HR" v={lead.hr_name || '—'} /><KV k="Email" v={lead.hr_email} copyable mailto /><KV k="Phone" v={lead.hr_mobile} /><KV k="LinkedIn" v={lead.hr_linkedin_url} link /></DetailBlock>
-                                <DetailBlock title="Company & Job"><KV k="Company" v={lead.company_name} /><KV k="Domain" v={lead.company_domain} link /><KV k="Job" v={lead.job_title} /><KV k="Source" v={lead.source_site} /></DetailBlock>
+                                <DetailBlock title="Contact"><KV k="HR" v={lead.hr_name || '—'} /><KV k="Email" v={lead.hr_email} copyable mailto /><KV k="Phone" v={lead.hr_mobile} copyable /><KV k="LinkedIn" v={lead.hr_linkedin_url} link /></DetailBlock>
+                                <DetailBlock title="Company & Job"><KV k="Company" v={lead.company_name} /><KV k="Domain" v={lead.company_domain} link /><KV k="Job" v={lead.job_title} /><KV k="Source" v={lead.source_site} /><KV k="Location" v={[lead.city, lead.state, lead.country].filter(Boolean).join(', ') || lead.location} /><KV k="Workplace" v={lead.location_type || (lead.is_work_from_home ? 'remote' : null)} /><KV k="Employment" v={lead.employment_type} /><KV k="Experience" v={lead.experience_level} /><KV k="Department" v={lead.department} /><KV k="Openings" v={lead.openings_count != null ? String(lead.openings_count) : undefined} /><KV k="Salary" v={lead.salary_range} /><KV k="Posted" v={lead.posted_at ? formatDate(lead.posted_at) : undefined} /><KV k="Apply URL" v={lead.apply_url || lead.job_url} link copyable /></DetailBlock>
                                 <DetailBlock title="Pipeline">
                                   <div className="mb-2 text-[11px] text-muted-foreground">Manual enrichment</div>
                                   <div className="flex flex-wrap gap-1.5">{ENRICH_PROVIDERS.map((p) => <Button key={p.key} size="sm" variant="secondary" onClick={() => enrich(lead.id, p.key)}><p.icon className="h-3.5 w-3.5" />{p.label.replace(' (auto)', '')}</Button>)}</div>

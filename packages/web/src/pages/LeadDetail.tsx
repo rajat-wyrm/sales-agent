@@ -482,8 +482,15 @@ const LeadDetail: React.FC = () => {
                   of dashes. */}
               {[
                 ['Location', [lead.city, lead.state, lead.country].filter(Boolean).join(', ') || lead.location],
-                ['Workplace', lead.location_type],
+                ['Workplace', lead.location_type || (lead.is_work_from_home ? 'remote' : null)],
                 ['Employment', lead.employment_type],
+                ['Country', lead.country],
+                ['Salary', [lead.salary_min, lead.salary_max].filter((n) => n != null).length
+                  ? `${lead.salary_currency === 'INR' || !lead.salary_currency ? '₹' : lead.salary_currency + ' '}` +
+                    [lead.salary_min, lead.salary_max].filter((n) => n != null)
+                      .map((n: any) => Math.round(Number(n)).toLocaleString('en-IN')).join('-') +
+                    (lead.salary_period ? ` / ${lead.salary_period}` : '')
+                  : null],
                 ['Department', lead.department],
                 ['Openings', lead.openings_count != null ? String(lead.openings_count) : null],
                 ['Posted', lead.posted_at ? formatDate(lead.posted_at) : null],

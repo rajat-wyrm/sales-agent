@@ -695,10 +695,20 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
             if loc:
                 break
     about_text = (normalized.get("about_job") or "").lower()
-    workplace = str(
-        raw.get("workplace_type") or raw.get("workplaceType") or raw.get("workMode")
-        or raw.get("typeOfEmployment") or raw.get("employment_type") or raw.get("type") or ""
-    ).strip().lower()
+    # Workplace (remote/onsite/hybrid) and employment type (full-time/internship)
+    # are different facets; typeOfEmployment was being read as workplace, which
+    # both lost the job type and risked misclassifying the work mode.
+    def _label_of(v: Any) -> str:
+        """Sources send these as a string or an {id, label} object."""
+        if isinstance(v, dict):
+            return str(v.get("label") or v.get("name") or v.get("id") or "").strip()
+        return str(v or "").strip()
+
+    workplace = (_label_of(raw.get("workplace_type")) or _label_of(raw.get("workplaceType"))
+                 or _label_of(raw.get("workMode"))).lower()
+    employment_raw = (_label_of(raw.get("typeOfEmployment")) or _label_of(raw.get("employment_type"))
+                      or _label_of(raw.get("employmentType")) or _label_of(raw.get("jobType"))
+                      or _label_of(raw.get("job_type"))).lower()
     wt_map = {
         "remote": "remote", "work from home": "remote", "wfh": "remote",
         "onsite": "onsite", "on-site": "onsite", "office": "onsite",
@@ -716,12 +726,21 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
     # Many Indian boards only state the work mode inside the description text
     # ("Hybrid", "Work from home"); infer it there rather than leaving NULL.
     if location_type is None and about_text:
-        hits = {w for w in ("remote", "onsite", "on-site", "hybrid", "work from home") if w in about_text}
-        if hits == {"hybrid"} or ("hybrid" in hits and len(hits) == 1):
+        # Group synonyms first: "remote" and "work from home" are the same answer,
+        # so their co-occurrence must not read as ambiguous (it previously bailed to
+        # NULL on "Fully remote role, work from home").
+        groups = set()
+        if any(w in about_text for w in ("remote", "work from home", "wfh", "location independent")):
+            groups.add("remote")
+        if any(w in about_text for w in ("onsite", "on-site", "in office", "office-based", "from office")):
+            groups.add("onsite")
+        if "hybrid" in about_text:
+            groups.add("hybrid")
+        if len(groups) == 1:
+            location_type = next(iter(groups))
+        elif "hybrid" in groups:
+            # "hybrid" alongside a bare mention of remote/office still means hybrid.
             location_type = "hybrid"
-        elif hits and len(hits) == 1:
-            only = next(iter(hits))
-            location_type = "remote" if only in ("remote", "work from home") else "onsite"
 
     salary_range = normalized.get("salary_range") or ""
     s_min, s_max, s_cur, s_per = _parse_salary_bounds(raw, salary_range)
@@ -840,11 +859,19 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
         if posted_dt is not None and posted_dt.tzinfo is None:
             posted_dt = posted_dt.replace(tzinfo=_dt.timezone.utc)
 
-    openings = raw.get("openings") or raw.get("openings_count") or raw.get("vacancies") or raw.get("no_of_positions")
-    try:
-        openings = int(openings) if openings not in (None, "") else None
-    except (TypeError, ValueError):
-        openings = None
+    # Only a genuine count qualifies. Sources also carry "opening"/"openingPlain",
+    # which are the full HTML job description -- coercing those would dump markup
+    # into an integer column, so they are deliberately not consulted.
+    openings = None
+    for _k in ("openings", "openings_count", "vacancies", "no_of_positions", "positions"):
+        _v = raw.get(_k)
+        if _v in (None, ""):
+            continue
+        try:
+            openings = int(str(_v).strip())
+            break
+        except (TypeError, ValueError):
+            continue
 
     return {
         "location": loc or None,
@@ -852,15 +879,14 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
         "state": (raw.get("state") or "").strip() or None,
         "country": (raw.get("country") or "").strip() or None,
         "location_type": location_type,
-        "employment_type": (str(raw.get("employment_type") or raw.get("employmentType") or "").strip().lower()
-                            or ("fulltime" if "full time" in workplace or "full-time" in workplace else None)),
+        "employment_type": employment_raw or None,
         "is_work_from_home": location_type == "remote",
         "apply_url": (str(raw.get("apply_url") or raw.get("applyUrl") or raw.get("application_url") or "").strip()
                       or normalized.get("job_url") or None),
         "posted_at": posted_dt,
         "about_job": (normalized.get("about_job") or "").strip() or None,
-        "department": (str(raw.get("department") or raw.get("category") or raw.get("functional_area")
-                            or raw.get("roleId") or raw.get("roleCategoryId") or "").strip()) or None,
+        "department": (_label_of(raw.get("department")) or _label_of(raw.get("function"))
+                       or _label_of(raw.get("category")) or _label_of(raw.get("functional_area"))) or None,
         "openings_count": openings,
         "salary_min": s_min,
         "salary_max": s_max,

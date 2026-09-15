@@ -76,7 +76,8 @@ def test_location_from_array_of_objects():
 def test_workplace_type_variants():
     assert _cols({"about_job": "x", "raw_payload": {"workMode": "Hybrid"}})["location_type"] == "hybrid"
     assert _cols({"about_job": "x", "raw_payload": {"workplaceType": "wfh"}})["location_type"] == "remote"
-    assert _cols({"about_job": "x", "raw_payload": {"typeOfEmployment": "On-site"}})["location_type"] == "onsite"
+    # typeOfEmployment is deliberately NOT a workplace source any more; see
+    # test_employment_type_is_not_the_workplace.
 
 
 def test_hybrid_inferred_from_description():
@@ -167,3 +168,53 @@ def test_sub_thousand_band_rejected():
     # phrasings such as "stipend within 1-2 months".
     c = _cols({"about_job": "stipend within 1-2 months"})
     assert c["salary_min"] is None
+
+
+# --- facet extraction: real payload shapes from the wired sources ------------
+
+def test_object_labels_are_preferred_over_ids():
+    # SmartRecruiters sends {"id": "engineering", "label": "Engineering"}.
+    c = _cols({"about_job": "x", "raw_payload": {
+        "typeOfEmployment": {"id": "permanent", "label": "Full-time"},
+        "function": {"id": "engineering", "label": "Engineering"},
+        "workplaceType": "Hybrid"}})
+    assert c["employment_type"] == "full-time"
+    assert c["department"] == "Engineering"
+    assert c["location_type"] == "hybrid"
+
+
+def test_employment_type_is_not_the_workplace():
+    """typeOfEmployment is a job type, not remote/onsite; conflating them lost both."""
+    c = _cols({"about_job": "x", "raw_payload": {
+        "typeOfEmployment": {"id": "permanent", "label": "Internship"}}})
+    assert c["employment_type"] == "internship"
+    assert c["location_type"] is None
+
+
+def test_html_opening_text_is_not_an_openings_count():
+    # Freshersworld-style payloads carry "opening"/"openingPlain" = full HTML JD.
+    c = _cols({"about_job": "x", "raw_payload": {
+        "opening": "<div><b>Nium is hiring</b></div>",
+        "openingPlain": "Nium, the leader in real-time global payments"}})
+    assert c["openings_count"] is None
+
+
+def test_numeric_openings_still_parsed():
+    assert _cols({"about_job": "x", "raw_payload": {"openings": "3"}})["openings_count"] == 3
+    assert _cols({"about_job": "x", "raw_payload": {"vacancies": 5}})["openings_count"] == 5
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Fully remote role, work from home", "remote"),   # synonyms must not look ambiguous
+    ("WFH internship, location independent", "remote"),
+    ("Hybrid setup in Gurugram", "hybrid"),
+    ("Must be onsite in the Bengaluru office", "onsite"),
+    ("Based in Pune", None),                            # a city is not a work mode
+    ("Great fresher opportunity", None),
+])
+def test_workplace_inferred_from_description(text, want):
+    assert _cols({"about_job": text})["location_type"] == want
+
+
+def test_empty_department_object_yields_none():
+    assert _cols({"about_job": "x", "raw_payload": {"department": {}}})["department"] is None
