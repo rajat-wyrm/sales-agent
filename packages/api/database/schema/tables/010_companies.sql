@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS companies (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
+  name TEXT NOT NULL CHECK (trim(name) <> ''),
   domain TEXT UNIQUE,
   about TEXT,
   industry TEXT,
