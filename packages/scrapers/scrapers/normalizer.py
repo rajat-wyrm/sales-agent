@@ -1381,6 +1381,7 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
         _jc = job_posting_columns(normalized)
         await sql.execute(
             """UPDATE job_postings SET last_seen_at = NOW(), raw_payload = $1, content_hash = $2,
+                       parser_version = $19,
                        location = COALESCE(location, $3),
                        city = COALESCE(city, $4),
                        state = COALESCE(state, $5),
@@ -1404,7 +1405,7 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             _jc["posted_at"], _jc["about_job"], _jc["department"],
             _jc["openings_count"], _jc["salary_min"], _jc["salary_max"],
             _jc["salary_currency"], _jc["salary_period"],
-            existing,
+            existing, PARSER_VERSION,
         )
         logger.info(f"Lead deduped (fingerprint match): {fp}")
         return None
@@ -1421,7 +1422,7 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
         _jc = job_posting_columns(normalized)
         await sql.execute(
             """UPDATE job_postings SET first_seen_at = NOW(), last_seen_at = NOW(),
-                       raw_payload = $1, content_hash = $2,
+                       raw_payload = $1, content_hash = $2, parser_version = $19,
                        location = COALESCE(location, $3),
                        city = COALESCE(city, $4),
                        state = COALESCE(state, $5),
@@ -1445,7 +1446,7 @@ async def insert_lead(sql: asyncpg.Connection, normalized: dict[str, Any]) -> st
             _jc["posted_at"], _jc["about_job"], _jc["department"],
             _jc["openings_count"], _jc["salary_min"], _jc["salary_max"],
             _jc["salary_currency"], _jc["salary_period"],
-            old_existing,
+            old_existing, PARSER_VERSION,
         )
         job_id = old_existing
     else:
