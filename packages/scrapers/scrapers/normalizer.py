@@ -574,35 +574,46 @@ async def run_whois_lookup(company_name: str) -> tuple[str | None, dict[str, Any
     return None, meta
 
 
+HOLEHE_TIMEOUT = 45
+
+
 async def run_holehe_check(email: str) -> dict[str, Any]:
     """SRS §4.5.4: OSINT personal-contact augmentation with holehe.
-    
-    Checks which platforms an email is registered on — validity signal.
-    Returns dict with platforms where email is registered.
+
+    Checks which public sites an email is registered on -- a validity signal.
+
+    holehe 1.61 has NO --json flag; the previous call passed it, the CLI exited
+    non-zero on "unrecognized arguments", and every check silently returned
+    valid=False, so Tier 3 (generic company inboxes) never validated anything.
+    Parse the real "[+]/[x]/[-]" line output instead.
     """
     try:
-        # holehe is a CLI tool, run via subprocess
-        cmd = ["holehe", email, "--json"]
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            "holehe", email, "--no-color", "--no-clear",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.STDOUT,
         )
-        stdout, stderr = await proc.communicate()
-        
-        if proc.returncode == 0 and stdout:
-            try:
-                result = json.loads(stdout.decode())
-                platforms = [k for k, v in result.items() if v]
-                logger.info(f"holehe: {redact_email(email)} registered on {len(platforms)} platforms")
-                return {"valid": len(platforms) > 0, "platforms": platforms}
-            except json.JSONDecodeError:
-                pass
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=HOLEHE_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.debug(f"holehe timed out after {HOLEHE_TIMEOUT}s for {redact_email(email)}")
+            return {"valid": False, "platforms": [], "timeout": True}
+
+        text = stdout.decode(errors="replace")
+        # [+] used, [-] not used, [x] rate-limited (an unknown, NOT evidence of use).
+        # Anchor to a bare "[+] domain" result line. holehe also prints a legend,
+        # "[+] Email used, [-] Email not used, [x] Rate limit", which a looser match
+        # picked up and made EVERY address -- including dead domains -- look valid.
+        used = re.findall(r"^\[\+]\s+([a-z0-9][a-z0-9._-]*\.[a-z]{2,})\s*$", text, re.I | re.M)
+        if used:
+            logger.info(f"holehe: {redact_email(email)} registered on {len(used)} platforms")
+        return {"valid": bool(used), "platforms": used}
     except FileNotFoundError:
         logger.warning("holehe not installed, skipping OSINT check")
     except Exception as e:
         logger.warning(f"holehe check failed for {redact_email(email)}: {e}")
-    
+
     return {"valid": False, "platforms": []}
 
 

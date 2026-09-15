@@ -6,6 +6,7 @@ sequential 10s timeouts per lead -- the normalizer appeared to hang and throughp
 collapsed to a trickle while producing zero results. The breaker must trip fast and
 then make no further attempts.
 """
+import inspect
 import importlib
 import sys
 import time
@@ -142,3 +143,35 @@ def test_success_resets_the_counter(monkeypatch):
     assert email == "hr@acme.com"
     assert N._whois_consecutive_failures == 0
     assert N._whois_disabled is False
+
+
+# --- holehe output parsing ---------------------------------------------------
+
+def test_holehe_parses_real_result_lines_and_ignores_the_legend():
+    """holehe 1.61 has no --json flag; the old call passed it, the CLI exited
+    non-zero on 'unrecognized arguments', and every check silently came back
+    valid=False. Parsing '[+]/[-]/[x]' lines is the only working contract, and the
+    legend line starts with '[+]' too, so a loose match marks dead domains valid."""
+    import re
+    from scrapers.normalizer import run_holehe_check
+    src = inspect.getsource(run_holehe_check)
+    # Assert on the invoked arguments, not the whole source: the docstring explains
+    # that --json does not exist and would otherwise trip a naive substring check.
+    argv = src[src.index("asyncio.create_subprocess_exec"):].split("\n")[1]
+    assert "--json" not in argv, "holehe has no --json; passing it fails the call"
+    # The pattern as written in the module, exercised against real-shaped output.
+    pat = re.search(r're\.findall\(r"([^"]+)"', src).group(1)
+    sample = (
+        "[+] gmail.com\n[-] zoho.com\n[x] xing.com\n[+] twitter.com\n"
+        "[?] npm\n[+] Email used, [-] Email not used, [x] Rate limit\n"
+    )
+    found = re.findall(pat, sample, re.I | re.M)
+    assert found == ["gmail.com", "twitter.com"], found
+
+
+def test_rate_limited_platforms_are_not_treated_as_valid():
+    """'[x]' means rate limited -- an unknown, not evidence the mailbox exists."""
+    import re
+    from scrapers.normalizer import run_holehe_check
+    pat = re.search(r're\.findall\(r"([^"]+)"', inspect.getsource(run_holehe_check)).group(1)
+    assert re.findall(pat, "[x] github.com\n[x] adobe.com\n", re.I | re.M) == []

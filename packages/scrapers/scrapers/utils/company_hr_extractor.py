@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+# Google dork queries measured at 6.7-8.6s from inside the worker container, so
+# the budget has to clear that or contact discovery silently never runs.
+DORK_TIMEOUT = 15.0
+
 
 import aiohttp
 
@@ -554,7 +558,11 @@ async def _extract_via_dork(session: aiohttp.ClientSession, company: str, domain
             try:
                 results = await asyncio.wait_for(
                     asyncio.to_thread(ddgs.text, query, max_results=5),
-                    timeout=5,
+                    # Measured in-container: 6.7-8.6s per Google dork query (median
+                    # ~7.9s). The previous 5s budget was below every real response,
+                    # so this whole strategy timed out ~100% of the time and HR
+                    # contacts were never found -- not a data problem, a timeout one.
+                    timeout=DORK_TIMEOUT,
                 )
             except Exception:
                 return local_candidates
