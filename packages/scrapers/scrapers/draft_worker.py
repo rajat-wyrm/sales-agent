@@ -35,7 +35,7 @@ DRAFT_PROMPT_TEMPLATE = (_PROMPTS_DIR / "draft_prompt.txt").read_text(encoding="
 
 EMAIL_TEMPLATE = subject_template = """Hi {hr_name_or_title},
 
-I noticed {company_name} is hiring for a {job_title} role{experience_clause}.
+I noticed {company_name} is hiring for {article} {job_title} role{experience_clause}.
 
 At HireGen, we help companies like yours find top fresher talent — candidates who are ready to contribute from day one. Our platform connects you with pre-verified entry-level candidates who match your exact requirements.
 
@@ -101,6 +101,9 @@ def generate_template_draft(lead_data: dict[str, Any]) -> dict[str, Any]:
         job_title=job_title,
         experience_clause=experience_clause,
         job_url=job_url if job_url else "N/A",
+        # "a Engineer" / "an Intern" -- picked from the actual title rather than
+        # hardcoding either, since titles start with any letter.
+        article="an" if job_title[:1].lower() in "aeiou" else "a",
         sender_name=resolve_sender_name(lead_data),
     )
 
