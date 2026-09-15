@@ -3,7 +3,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime, timezone
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import Depends, FastAPI, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 import uuid
@@ -22,6 +22,27 @@ app = FastAPI(
 # Shared asyncpg pool captured at startup so the on-demand /army/run sweep can
 # query under-enriched leads without creating a second pool.
 _db_pool = None
+
+WORKER_API_SECRET = os.environ.get("WORKER_API_SECRET", "")
+
+
+def require_worker_key(x_worker_key: Optional[str] = Header(None)):
+    """Gate the mutating endpoints.
+
+    This service triggers scrapes and spends paid vendor credits (Snov.io, ContactOut
+    bill per lookup), so an unauthenticated POST used to let anyone run the army on
+    demand. Binding the port to loopback limits who can reach it but is not
+    authentication -- anything else on this host, or a future proxy, still could.
+
+    Fails CLOSED: with no secret configured, every mutating call is refused rather than
+    silently wide open, so a missing environment variable shows up as a broken deploy
+    instead of an exposed endpoint.
+    """
+    if not WORKER_API_SECRET:
+        raise HTTPException(503, "worker API is not configured (WORKER_API_SECRET unset)")
+    if x_worker_key != WORKER_API_SECRET:
+        raise HTTPException(401, "invalid worker key")
+    return True
 
 
 class ScrapeRequest(BaseModel):
@@ -89,7 +110,7 @@ def _get_tier(name: str) -> int:
 
 
 @app.post("/scrape/trigger")
-async def trigger_scrape(req: ScrapeRequest):
+async def trigger_scrape(req: ScrapeRequest, _auth: bool = Depends(require_worker_key)):
     redis_client = get_redis()
     run_id = str(uuid.uuid4())
     await redis_client.lpush(
@@ -123,7 +144,7 @@ async def army_status():
 
 
 @app.post("/army/run")
-async def army_run(req: ScrapeRequest):
+async def army_run(req: ScrapeRequest, _auth: bool = Depends(require_worker_key)):
     """One-click army: enqueue a full-fleet scrape AND an immediate
     re-enrichment sweep so leads already in the DB but missing contacts get the
     fallback cascade retried now (not just at the next daily tick). Scraping and

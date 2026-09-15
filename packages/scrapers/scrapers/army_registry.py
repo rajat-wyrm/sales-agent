@@ -140,7 +140,11 @@ async def maybe_fallback_wave(
         await redis_client.lpush(
             "scrape_queue:requests",
             _json.dumps({
-                "run_id": f"fallback-{_uuid.uuid4().hex[:8]}",
+                # Must be a real UUID: scrape_runs.id is uuid-typed, and the previous
+                # "fallback-<hex8>" value made every INSERT from the consumer raise
+                # ValueError: invalid UUID, so fallback waves recorded no run history at
+                # all -- invisible in Analytics while the scrape itself succeeded.
+                "run_id": str(_uuid.uuid4()),
                 "run_type": "fallback-wave",
                 "sources": sibs,
                 "triggered_by": (job or {}).get("triggered_by"),

@@ -52,6 +52,7 @@ services:
       REDIS_URL: redis://redis:6379
       HOST: 0.0.0.0
       WORKERS_URL: http://workers:8000
+      WORKER_API_SECRET: ${WORKER_API_SECRET}
     depends_on:
       - postgres
       - redis
@@ -78,6 +79,7 @@ services:
     env_file:
       - .env
     environment:
+      WORKER_API_SECRET: ${WORKER_API_SECRET}
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/leads_db
       REDIS_URL: redis://redis:6379
       REACHER_URL: http://reacher:3000

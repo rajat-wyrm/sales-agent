@@ -38,9 +38,9 @@ const settingsSchema = z.object({
     max_concurrency: z.number().min(1).optional(),
     timeout_seconds: z.number().min(1).optional(),
   }).optional(),
-  scoring_weights: z.record(z.number().min(0).max(100)).optional(),
+  scoring_weights: z.record(z.string(), z.number().min(0).max(100)).optional(),
   cron_schedule: z.string().min(1).optional(),
-  sources_enabled: z.record(z.boolean()).optional(),
+  sources_enabled: z.record(z.string(), z.boolean()).optional(),
 });
 
 export const adminRoutes: FastifyPluginAsync = async (fastify) => {
@@ -102,7 +102,13 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         const res = await fetch(`${workersUrl}/army/run`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            // The worker service spends paid vendor credits per run, so it now
+            // requires a shared secret. Read at call time: env is a Proxy and the
+            // value may not exist when this module is first imported.
+            'x-worker-key': process.env.WORKER_API_SECRET || '',
+          },
           body: JSON.stringify({ sources: parseResult.data.sources || null, triggered_by: triggeredBy }),
         });
         const data = await res.json();

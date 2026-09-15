@@ -9,6 +9,7 @@ Per SRS §4.6: scrapers push raw records to raw_leads_queue.
 """
 
 import json
+import uuid
 import os
 import asyncio
 import logging
@@ -190,7 +191,15 @@ async def consume_scrape_queue(
                 await asyncio.sleep(1)
                 continue
             raw_msg, job = got
-            run_id = job.get("run_id", "unknown")
+            # scrape_runs.id is uuid-typed; a caller that passes anything else used to
+            # fail the INSERT with ValueError deep inside asyncpg, losing the run record
+            # while the scrape itself succeeded. Coerce instead of trusting producers.
+            raw_run_id = str(job.get("run_id") or "")
+            try:
+                run_id = str(uuid.UUID(raw_run_id))
+            except ValueError:
+                logger.warning(f"run_id {raw_run_id!r} is not a UUID; generating one")
+                run_id = str(uuid.uuid4())
             sources = resolve_sources(job.get("sources")) or []
             run_type = job.get("run_type", "manual")
             triggered_by = job.get("triggered_by")
