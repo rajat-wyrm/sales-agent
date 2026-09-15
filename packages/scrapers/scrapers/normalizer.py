@@ -21,8 +21,8 @@ import asyncio
 import logging
 import hashlib
 import re
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import redis.asyncio as redis
@@ -671,6 +671,59 @@ def _parse_salary_bounds(raw: dict[str, Any], salary_range: str) -> tuple[float 
     return lo, hi, (currency or ""), (period or "")
 
 
+# Boards label the posting date inconsistently and in five different shapes --
+# "August 11, 2026", ISO-8601 with an offset, epoch milliseconds, "1 day ago",
+# plain "2026-09-12" -- so all of them are tried rather than assuming a source is
+# well-behaved. An unparseable value yields None: the column stays honestly empty
+# instead of asserting a date the posting never carried.
+POSTED_AT_KEYS = (
+    "posted_at", "published_at", "postedAt", "published_date", "posted_date",
+    "date_posted", "datePosted", "publishedOn", "publishDate", "first_published",
+    "firstPublishDate", "releasedDate", "postedOn", "published", "posting_date",
+    "createdAt", "created_at",
+)
+
+_REL_RE = re.compile(r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago", re.I)
+# month/year approximated -- enough to sort and filter by recency, not a calendar claim.
+_REL_DAYS = {"second": 0, "minute": 0, "hour": 0, "day": 1, "week": 7, "month": 30, "year": 365}
+_REL_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
+
+
+def parse_posted_at(value: Any) -> Optional[datetime]:
+    """Normalise any source's posting date to an aware datetime, or None."""
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    # Epoch seconds or milliseconds, as a number or a numeric string.
+    if text.isdigit():
+        try:
+            num = int(text)
+            return datetime.fromtimestamp(num / 1000 if num > 1e11 else num, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    m = _REL_RE.search(text)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = timedelta(seconds=n * _REL_SECONDS.get(unit, 0)) if unit in _REL_SECONDS \
+            else timedelta(days=n * _REL_DAYS[unit])
+        return datetime.now(timezone.utc) - delta
+    for candidate in (text[:-1] + "+00:00" if text.endswith("Z") else text, text):
+        try:
+            dt = datetime.fromisoformat(candidate)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d-%m-%Y",
+                "%m/%d/%Y", "%Y/%m/%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
     """Map a normalized lead onto every job_postings column.
 
@@ -837,27 +890,11 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
             s_min = values[0]
             s_cur = s_cur or "INR"
 
-    posted = raw.get("posted_at") or raw.get("published_at") or raw.get("publishDate") or raw.get("firstPublishDate")
     posted_dt = None
-    if posted:
-        import datetime as _dt
-        if isinstance(posted, (int, float)):
-            try:
-                posted_dt = _dt.datetime.fromtimestamp(posted / 1000 if posted > 1e11 else posted, tz=_dt.timezone.utc)
-            except (OverflowError, OSError, ValueError):
-                posted_dt = None
-        else:
-            s = str(posted).strip().replace("Z", "+00:00")
-            for fmt in (None, "%Y-%m-%d", "%d/%m/%Y", "%b %d, %Y"):
-                try:
-                    posted_dt = _dt.datetime.fromisoformat(s) if fmt is None else _dt.datetime.strptime(s, fmt)
-                    break
-                except (ValueError, TypeError):
-                    continue
-            else:
-                posted_dt = None
-        if posted_dt is not None and posted_dt.tzinfo is None:
-            posted_dt = posted_dt.replace(tzinfo=_dt.timezone.utc)
+    for _k in POSTED_AT_KEYS:
+        posted_dt = parse_posted_at(raw.get(_k))
+        if posted_dt:
+            break
 
     # Only a genuine count qualifies. Sources also carry "opening"/"openingPlain",
     # which are the full HTML job description -- coercing those would dump markup

@@ -218,3 +218,34 @@ def test_workplace_inferred_from_description(text, want):
 
 def test_empty_department_object_yields_none():
     assert _cols({"about_job": "x", "raw_payload": {"department": {}}})["department"] is None
+
+
+# --- posted_at: five real source formats, no invented dates ------------------
+
+def test_posted_at_parses_every_shape_seen_in_the_wild():
+    from datetime import timedelta
+    from scrapers.normalizer import parse_posted_at as p
+    assert p("August 11, 2026").date().isoformat() == "2026-08-11"
+    assert p("11 August 2026").date().isoformat() == "2026-08-11"
+    assert p("2026-09-10").date().isoformat() == "2026-09-10"
+    assert p("2026-09-12T06:48:33.071192+00:00").month == 9
+    assert p("2026-09-04T07:12:34-04:00").utcoffset() == timedelta(hours=-4)
+    assert p(1783081690).year > 2020            # epoch seconds
+    assert p("1787468433504").year > 2020       # epoch milliseconds as a string
+    assert p("1 day ago") is not None
+    assert all(p(v).tzinfo is not None for v in
+               ("August 11, 2026", "2026-09-10", 1783081690, "1 day ago"))
+
+
+@pytest.mark.parametrize("bad", ["garbage text", "", "   ", None, {}, [], "13/13/2026"])
+def test_unparseable_posted_at_stays_null(bad):
+    """An empty column is honest; a guessed date would be fabricated data."""
+    from scrapers.normalizer import parse_posted_at
+    assert parse_posted_at(bad) is None
+
+
+def test_posted_at_found_under_source_specific_key():
+    # jobinsider-style payloads use posted_date, others use releasedDate/published.
+    for key in ("posted_date", "releasedDate", "published", "first_published", "createdAt"):
+        c = _cols({"about_job": "x", "raw_payload": {key: "September 10, 2026"}})
+        assert c["posted_at"] is not None, key
