@@ -104,6 +104,12 @@ export const leads = {
     const res = await api.get('/leads', { params });
     return res.data;
   },
+  // Server-side export: every lead matching the filters, as a styled workbook.
+  // responseType blob so axios does not try to parse the XML payload.
+  exportExcel: async (params?: Record<string, any>) => {
+    const res = await api.get('/leads/export', { params, responseType: 'blob' });
+    return res.data as Blob;
+  },
   get: async (id: string) => {
     const res = await api.get(`/leads/${id}`);
     return res.data;

@@ -35,9 +35,11 @@ import json
 import logging
 import os
 import random
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 logger = logging.getLogger("scraper.http")
 # Keep full request URLs (which carry API keys for the query-auth vendors and the
@@ -284,6 +286,100 @@ class Response:
     engine: str
 
 
+# ---------------------------------------------------------------------------
+# Per-domain politeness (adapted from the HireGen stealth client, ported into
+# this module rather than added as a parallel one -- fetch() is already the sole
+# HTTP chokepoint for all 48 scrapers, so throttling belongs here).
+#
+# Without it, concurrent workers can hit one board's API dozens of times per
+# second and get the whole egress IP rate-limited or banned, which shows up as
+# mysteriously thin scrape results rather than an error.
+# ---------------------------------------------------------------------------
+
+_DOMAIN_WINDOW_SECONDS = 60.0
+_MAX_CONCURRENT_PER_DOMAIN = int(os.getenv("SCRAPER_MAX_PER_DOMAIN", "2"))
+_MIN_SPACING_SECONDS = float(os.getenv("SCRAPER_MIN_SPACING", "0.35"))
+_COOLDOWN_SECONDS = float(os.getenv("SCRAPER_COOLDOWN", "30"))
+_COOLDOWN_THRESHOLD = 3
+
+_domain_semaphores: dict[str, asyncio.Semaphore] = {}
+_domain_recent: dict[str, list[float]] = defaultdict(list)   # request timestamps
+_domain_failures: dict[str, int] = {}
+_domain_cooling_until: dict[str, float] = {}
+
+
+def _domain_of(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+    # Collapse www.<registrator> so subdomains of one board share one budget.
+    return host[4:] if host.startswith("www.") else host
+
+
+_NO_LIMIT = asyncio.Semaphore(10 ** 6)
+
+
+def _sem_for(domain: str) -> asyncio.Semaphore:
+    if not domain:
+        return _NO_LIMIT
+    sem = _domain_semaphores.get(domain)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_PER_DOMAIN)
+        _domain_semaphores[domain] = sem
+    return sem
+
+
+async def _throttle(domain: str) -> None:
+    """Space requests to one host and skip hosts in cooldown."""
+    if not domain:
+        return
+    now = time.monotonic()
+    cooling_until = _domain_cooling_until.get(domain, 0.0)
+    if cooling_until > now:
+        # Do not fail the request: wait out the cooldown so a caller mid-run
+        # still succeeds instead of losing leads to a transient block.
+        await asyncio.sleep(cooling_until - now)
+    window = _domain_recent[domain]
+    cutoff = time.monotonic() - _DOMAIN_WINDOW_SECONDS
+    while window and window[0] < cutoff:
+        window.pop(0)
+    if len(window) >= _MAX_CONCURRENT_PER_DOMAIN * 10:
+        # Hard ceiling per minute regardless of concurrency: sustained hammering
+        # is what triggers IP-level bans.
+        await asyncio.sleep(_DOMAIN_WINDOW_SECONDS - (time.monotonic() - window[0]))
+    if window:
+        gap = _MIN_SPACING_SECONDS - (time.monotonic() - window[-1])
+        if gap > 0:
+            # Jitter avoids a synchronised metronome across workers, which itself
+            # looks like a bot.
+            await asyncio.sleep(gap + random.uniform(0, _MIN_SPACING_SECONDS))
+    _domain_recent[domain].append(time.monotonic())
+
+
+def _note_outcome(domain: str, blocked: bool, status: int = 0) -> None:
+    """Trip a per-domain cooldown after repeated hard blocks.
+
+    Only 403/429/503 count. `_looks_blocked()` also flags short or empty bodies,
+    which usually means a dead URL or an SPA shell rather than us being banned --
+    cooling down on those stalls healthy scrapers for no reason (a first version
+    did exactly that and lost 30s to a 2-character test body).
+    """
+    if not domain or status not in (403, 429, 503):
+        return
+    if blocked:
+        _domain_failures[domain] = _domain_failures.get(domain, 0) + 1
+        if _domain_failures[domain] >= _COOLDOWN_THRESHOLD:
+            _domain_cooling_until[domain] = time.monotonic() + _COOLDOWN_SECONDS
+            _domain_failures[domain] = 0
+            logger.warning(
+                "scraper politeness: %s cooling down for %.0fs after %d blocked responses",
+                domain, _COOLDOWN_SECONDS, _COOLDOWN_THRESHOLD,
+            )
+    else:
+        _domain_failures.pop(domain, None)
+
+
 async def fetch(url: str, *, timeout: int = 20, headers: Optional[dict] = None,
                 max_engine: str = "playwright", min_engine: str = "httpx") -> Response:
     """Fetch `url`, escalating engines until one returns a non-blocked document.
@@ -306,30 +402,40 @@ async def fetch(url: str, *, timeout: int = 20, headers: Optional[dict] = None,
     hi = ranks.get(max_engine, 2)
     order = [e for i, e in enumerate(["httpx", "curl", "playwright"]) if lo <= i <= hi]
     h = _browser_headers(headers)
+    domain = _domain_of(url)
     last_err: Optional[Exception] = None
     for engine in order:
-        proxy = _pick_proxy()
-        try:
-            if engine == "curl" and not _HAVE_CURL_CFFI:
+        if engine == "curl" and not _HAVE_CURL_CFFI:
+            continue
+        if engine == "httpx" and not _HAVE_HTTPX:
+            continue
+        # One in flight per host beyond the cap, spaced and cooldown-aware.
+        async with _sem_for(domain):
+            await _throttle(domain)
+            proxy = _pick_proxy()
+            try:
+                if engine == "httpx":
+                    status, text = await _t_httpx(url, h, proxy, timeout)
+                elif engine == "curl":
+                    status, text = await _t_curl(url, h, proxy, timeout)
+                else:
+                    status, text = await _t_playwright(url, h, proxy, timeout)
+            except asyncio.TimeoutError:
+                last_err = asyncio.TimeoutError(f"{engine} timeout {url}")
+                # A timeout IS pressure on this host, so let it contribute.
+                _domain_failures[domain] = _domain_failures.get(domain, 0) + 1
+                if domain and _domain_failures[domain] >= _COOLDOWN_THRESHOLD:
+                    _domain_cooling_until[domain] = time.monotonic() + _COOLDOWN_SECONDS
+                    _domain_failures[domain] = 0
                 continue
-            if engine == "httpx" and not _HAVE_HTTPX:
+            except Exception as e:  # noqa: BLE001  (a tier failing is expected; escalate)
+                last_err = e
                 continue
-            if engine == "httpx":
-                status, text = await _t_httpx(url, h, proxy, timeout)
-            elif engine == "curl":
-                status, text = await _t_curl(url, h, proxy, timeout)
-            else:
-                status, text = await _t_playwright(url, h, proxy, timeout)
-            if _looks_blocked(status, text) and engine != order[-1] and max_engine != "httpx":
-                # try a stronger engine before giving up
-                continue
+            blocked = _looks_blocked(status, text)
+            _note_outcome(domain, blocked=blocked, status=status)
+            if blocked and engine != order[-1] and max_engine != "httpx":
+                continue  # try a stronger engine before giving up
             return Response(status, text, engine)
-        except asyncio.TimeoutError:
-            last_err = asyncio.TimeoutError(f"{engine} timeout {url}")
-            continue
-        except Exception as e:  # noqa: BLE001  (a tier failing is expected; escalate)
-            last_err = e
-            continue
     if last_err:
         raise last_err
     return Response(0, "", "none")

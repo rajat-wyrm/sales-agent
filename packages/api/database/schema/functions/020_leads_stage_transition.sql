@@ -59,7 +59,11 @@ BEGIN
     RETURN old_stage IN ('enriched', 'verifying');
   END IF;
   IF new_stage = 'contact_unavailable' THEN
-    RETURN old_stage IN ('discovered', 'enriching', 'enriched', 'verifying');
+    -- Re-enriching a lead whose verification later failed can legitimately discover
+    -- it has no usable contact at all. Without this the lifecycle UPDATE raised,
+    -- the job retried, and the same exception repeated forever on those leads.
+    RETURN old_stage IN ('discovered', 'enriching', 'enriched', 'verifying',
+                         'verification_failed');
   END IF;
   IF new_stage IN ('send_failed', 'provider_error') THEN
     RETURN old_stage IN ('verified', 'ready_for_outreach', 'message_generated', 'drafted', 'send_pending');
@@ -76,7 +80,7 @@ BEGIN
     RETURN new_stage IN ('enriching', 'enriched', 'retry_pending');
   END IF;
   IF old_stage = 'verification_failed' THEN
-    RETURN new_stage IN ('verifying', 'verified', 'retry_pending');
+    RETURN new_stage IN ('verifying', 'verified', 'retry_pending', 'enriching');
   END IF;
   IF old_stage = 'contact_unavailable' THEN
     RETURN new_stage IN ('enriching', 'enriched');

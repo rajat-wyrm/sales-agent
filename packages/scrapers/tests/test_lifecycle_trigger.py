@@ -87,3 +87,24 @@ async def test_new_columns_default(db_pool):
         row = await conn.fetchrow("SELECT legal_basis, processing_purpose FROM leads WHERE id=$1", lid)
         assert row["legal_basis"] == "legitimate_interest_b2b"
         assert row["processing_purpose"] == "b2b_recruitment_outreach"
+
+
+async def test_verification_failed_to_contact_unavailable_is_legal(db_pool):
+    """Re-enriching a lead whose verification later failed can discover it has no
+    usable contact at all. That UPDATE used to raise, the job retried, and the same
+    exception repeated forever -- five leads were permanently stuck."""
+    async with db_pool.acquire() as conn:
+        lead = await _mk_lead(conn, "verification_failed")
+        await conn.execute(
+            "UPDATE leads SET pipeline_stage = 'contact_unavailable' WHERE id = $1", lead)
+        assert await conn.fetchval(
+            "SELECT pipeline_stage FROM leads WHERE id = $1", lead) == "contact_unavailable"
+
+
+async def test_contact_unavailable_still_not_reachable_from_sent(db_pool):
+    """Widening the entry set must not open a backward jump out of delivery."""
+    async with db_pool.acquire() as conn:
+        lead = await _mk_lead(conn, "sent")
+        with pytest.raises(Exception, match="illegal lead stage transition"):
+            await conn.execute(
+                "UPDATE leads SET pipeline_stage = 'contact_unavailable' WHERE id = $1", lead)

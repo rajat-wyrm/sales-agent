@@ -128,12 +128,32 @@ const Leads: React.FC = () => {
   const toggleSelect = (id: string) => setSelectedIds((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleExpand = (id: string) => setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const exportCsv = () => {
-    const cols = table.getAllLeafColumns().filter((c) => visibility[c.id] !== false && !['select', 'actions', 'expand', 'verification'].includes(c.id));
-    const header = cols.map((c) => c.id).join(',');
-    const lines = leadRows.map((r: any) => cols.map((c) => `"${String(r[c.id] ?? '').replace(/"/g, '""')}"`).join(','));
-    const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `hiregen-leads-page${page}.csv`; a.click();
+  // Excel export. The full dataset comes from the server (every lead matching the
+  // active filters, not just the 25 rows on screen); selected rows are exported
+  // client-side when a selection exists.
+  const [exporting, setExporting] = useState(false);
+  const downloadBlob = (blob: Blob, name: string) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      if (selectedIds.size > 0) {
+        const rows = leadRows.filter((r: any) => selectedIds.has(r.id));
+        downloadBlob(leadsToCsv(rows), `hiregen-leads-selected-${rows.length}.csv`);
+        toast({ title: `Exported ${rows.length} selected leads`, variant: 'success' });
+        return;
+      }
+      const blob = await leadsApi.exportExcel(exportParams);
+      downloadBlob(blob, `hiregen-leads-${new Date().toISOString().slice(0, 10)}.xls`);
+      toast({ title: 'Workbook downloaded', description: 'All filtered leads, 36 columns', variant: 'success' });
+    } catch (e: any) {
+      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: 'destructive' });
+    } finally {
+      setExporting(false);
+    }
   };
 
   const columnHelper = createColumnHelper<Lead & Record<string, any>>();

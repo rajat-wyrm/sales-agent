@@ -60,6 +60,226 @@ const verifyAndSendSchema = z.object({
 });
 
 
+/**
+ * Shared WHERE builder for GET /leads and GET /leads/export. Both must apply the
+ * identical RBAC scope and filters, or an export silently contains rows the user
+ * cannot see (or omits ones they filtered for).
+ */
+function buildLeadFilters(q: any, user: { id: string; role: string }) {
+   const conditions: string[] = [];
+   const values: unknown[] = [];
+   let paramIdx = 1;
+
+   // RBAC: sales_rep sees only assigned leads, admin sees all
+   if (user.role === 'sales_rep') {
+     conditions.push(`l.assigned_to = $${paramIdx}`);
+     values.push(user.id);
+     paramIdx++;
+   }
+
+   if (q.score_band) {
+     conditions.push(`l.score_band = $${paramIdx}`);
+     values.push(q.score_band);
+     paramIdx++;
+   }
+   if (q.pipeline_stage) {
+     conditions.push(`l.pipeline_stage = $${paramIdx}`);
+     values.push(q.pipeline_stage);
+     paramIdx++;
+   }
+   if (q.source_site) {
+     conditions.push(`jp.source_site = $${paramIdx}`);
+     values.push(q.source_site);
+     paramIdx++;
+   }
+   if (q.date_from) {
+     conditions.push(`l.created_at >= $${paramIdx}::timestamptz`);
+     values.push(q.date_from);
+     paramIdx++;
+   }
+   if (q.date_to) {
+     conditions.push(`l.created_at <= $${paramIdx}::timestamptz`);
+     values.push(q.date_to);
+     paramIdx++;
+   }
+   if (q.experience) {
+     conditions.push(`jp.experience_level = $${paramIdx}`);
+     values.push(q.experience);
+     paramIdx++;
+   }
+   if (q.location_type) {
+     conditions.push(`jp.location_type = $${paramIdx}`);
+     values.push(q.location_type);
+     paramIdx++;
+   }
+   if (q.city) {
+     conditions.push(`jp.city ILIKE $${paramIdx}`);
+     values.push(`%${q.city}%`);
+     paramIdx++;
+   }
+   if (q.state) {
+     conditions.push(`jp.state ILIKE $${paramIdx}`);
+     values.push(`%${q.state}%`);
+     paramIdx++;
+   }
+   if (q.department) {
+     conditions.push(`jp.department ILIKE $${paramIdx}`);
+     values.push(`%${q.department}%`);
+     paramIdx++;
+   }
+   if (q.salary_min != null) {
+     // COALESCE lets a source that only gives text still match on its numeric
+     // floor when one exists, and excludes rows with no pay data at all.
+     conditions.push(`COALESCE(jp.salary_min, NULL) >= $${paramIdx}`);
+     values.push(q.salary_min);
+     paramIdx++;
+   }
+   if (q.has_salary === true) {
+     conditions.push(`(jp.salary_min IS NOT NULL OR COALESCE(jp.salary_range, '') <> '')`);
+   } else if (q.has_salary === false) {
+     conditions.push(`(jp.salary_min IS NULL AND COALESCE(jp.salary_range, '') = '')`);
+   }
+   if (q.filter) {
+     conditions.push(`(c.name ILIKE $${paramIdx} OR c.domain ILIKE $${paramIdx} OR jp.title ILIKE $${paramIdx})`);
+     values.push(`%${q.filter}%`);
+     paramIdx++;
+   }
+  return { conditions, values, paramIdx };
+}
+
+/** Columns exported for every lead: label, value accessor, and Excel type. */
+const LEAD_EXPORT_COLUMNS: Array<{
+  header: string;
+  get: (r: any) => unknown;
+  type?: 'Number' | 'DateTime';
+  width: number;
+}> = [
+  { header: 'Score', get: (r) => r.lead_score, type: 'Number', width: 8 },
+  { header: 'Band', get: (r) => r.score_band, width: 10 },
+  { header: 'Company', get: (r) => r.company_name, width: 28 },
+  { header: 'Domain', get: (r) => r.company_domain, width: 24 },
+  { header: 'Job Title', get: (r) => r.job_title, width: 40 },
+  { header: 'Location', get: (r) => [r.city, r.state, r.country].filter(Boolean).join(', ') || r.location || '', width: 26 },
+  { header: 'City', get: (r) => r.city, width: 16 },
+  { header: 'State', get: (r) => r.state, width: 14 },
+  { header: 'Country', get: (r) => r.country, width: 12 },
+  // Previously absent from the export entirely.
+  { header: 'Location Type', get: (r) => r.location_type || (r.is_work_from_home ? 'remote' : ''), width: 14 },
+  { header: 'Employment Type', get: (r) => r.employment_type, width: 16 },
+  { header: 'Experience', get: (r) => r.experience_level, width: 14 },
+  { header: 'Department', get: (r) => r.department, width: 18 },
+  { header: 'Openings', get: (r) => r.openings_count, type: 'Number', width: 10 },
+  { header: 'Salary Range', get: (r) => r.salary_range, width: 22 },
+  { header: 'Salary Min', get: (r) => r.salary_min, type: 'Number', width: 12 },
+  { header: 'Salary Max', get: (r) => r.salary_max, type: 'Number', width: 12 },
+  { header: 'Currency', get: (r) => r.salary_currency, width: 10 },
+  { header: 'Salary Period', get: (r) => r.salary_period, width: 12 },
+  { header: 'HR Name', get: (r) => r.hr_name, width: 22 },
+  { header: 'HR Email', get: (r) => r.hr_email, width: 30 },
+  { header: 'HR Mobile', get: (r) => r.hr_mobile, width: 16 },
+  { header: 'HR LinkedIn', get: (r) => r.hr_linkedin_url, width: 34 },
+  { header: 'Email Status', get: (r) => r.email_status, width: 14 },
+  { header: 'WhatsApp Status', get: (r) => r.whatsapp_status, width: 16 },
+  { header: 'Pipeline Stage', get: (r) => r.pipeline_stage, width: 18 },
+  { header: 'Data Quality', get: (r) => r.data_quality, width: 14 },
+  { header: 'Source', get: (r) => r.source_site, width: 18 },
+  { header: 'Job URL', get: (r) => r.job_url, width: 40 },
+  { header: 'Apply URL', get: (r) => r.apply_url, width: 40 },
+  { header: 'Posted', get: (r) => r.posted_at, type: 'DateTime', width: 18 },
+  { header: 'Discovered', get: (r) => r.created_at, type: 'DateTime', width: 18 },
+  { header: 'Updated', get: (r) => r.updated_at, type: 'DateTime', width: 18 },
+  { header: 'Assigned To', get: (r) => r.assigned_to, width: 22 },
+  { header: 'Do Not Contact', get: (r) => (r.do_not_contact ? 'YES' : 'no'), width: 14 },
+  { header: 'Lead ID', get: (r) => r.id, width: 36 },
+];
+
+const xmlEscape = (v: unknown): string => String(v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+  // Strip control chars that produce a corrupt-but-openable workbook.
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+
+/** Excel/LibreOffice read this as a real styled workbook; no dependency needed. */
+export function buildLeadsWorkbook(rows: any[], requestedBy: string): string {
+  const cols = LEAD_EXPORT_COLUMNS;
+  const nowIso = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  const cell = (v: unknown, type?: string) => {
+    if (v === null || v === undefined || v === '') return '<Cell ss:StyleID="sBody"/>';
+    if (type === 'Number' && Number.isFinite(Number(v))) {
+      return `<Cell ss:StyleID="sNum"><Data ss:Type="Number">${Number(v)}</Data></Cell>`;
+    }
+    if (type === 'DateTime') {
+      const d = new Date(String(v));
+      if (!Number.isNaN(d.getTime())) {
+        return `<Cell ss:StyleID="sDate"><Data ss:Type="DateTime">${d.toISOString().replace(/\.\d+Z$/, 'Z')}</Data></Cell>`;
+      }
+    }
+    // Prefix guard so Excel does not evaluate scraped text as a formula.
+    const raw = String(v);
+    const safe = /^[=+@\t]/.test(raw) ? `'${raw}` : raw;
+    return `<Cell ss:StyleID="sBody"><Data ss:Type="String">${xmlEscape(safe)}</Data></Cell>`;
+  };
+
+  const header = `<Row ss:Height="26">${cols.map((c) =>
+    `<Cell ss:StyleID="sHead"><Data ss:Type="String">${xmlEscape(c.header)}</Data></Cell>`).join('')}</Row>`;
+  const body = rows.map((r) => `<Row>${cols.map((c) => cell(c.get(r), c.type)).join('')}</Row>`).join('');
+  const widths = cols.map((c) => `<Column ss:AutoFitWidth="0" ss:Width="${c.width}"/>`).join('');
+  const lastColLetter = String.fromCharCode(64 + cols.length);
+  const range = `R1C1:R${rows.length + 1}C${cols.length}`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">
+  <Title>HireGen Leads Export</Title>
+  <Author>HireGen Sales Agent</Author>
+  <Created>${nowIso}</Created>
+  <Description>${rows.length} leads, ${cols.length} columns${requestedBy ? `, exported by ${xmlEscape(requestedBy)}` : ''}</Description>
+ </DocumentProperties>
+ <Styles>
+  <Style ss:ID="Default" ss:Name="Normal"><Font ss:FontName="Calibri" ss:Size="11"/><Alignment ss:Vertical="Center"/></Style>
+  <Style ss:ID="sHead"><Font ss:FontName="Calibri" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
+   <Interior ss:Color="#1F3A5F" ss:Pattern="Solid"/><Alignment ss:Horizontal="Center" ss:Vertical="Center" ss:WrapText="1"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#12233A"/></Borders></Style>
+  <Style ss:ID="sBody"><Font ss:FontName="Calibri" ss:Size="10"/><Alignment ss:Vertical="Top" ss:WrapText="0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E3E7EE"/></Borders></Style>
+  <Style ss:ID="sNum"><Font ss:FontName="Calibri" ss:Size="10"/><Alignment ss:Horizontal="Right" ss:Vertical="Top"/>
+   <NumberFormat ss:Format="#,##0"/><Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E3E7EE"/></Borders></Style>
+  <Style ss:ID="sDate"><Font ss:FontName="Calibri" ss:Size="10"/><Alignment ss:Horizontal="Left" ss:Vertical="Top"/>
+   <NumberFormat ss:Format="yyyy-mm-dd hh:mm"/><Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E3E7EE"/></Borders></Style>
+  <Style ss:ID="sSumHead"><Font ss:FontName="Calibri" ss:Size="12" ss:Bold="1" ss:Color="#1F3A5F"/></Style>
+ </Styles>
+ <Worksheet ss:Name="Leads">
+  <Table ss:DefaultRowHeight="16">${widths}${header}${body}</Table>
+  <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
+   <FreezePanes/><SplitHorizontal>1</SplitHorizontal><TopRowBottomPane>1</TopRowBottomPane>
+   <ActivePane>2</ActivePane>
+   <PageSetup><x:Layout x:Orientation="Landscape"/><x:PageMargins x:Bottom="0.5" x:Left="0.4" x:Right="0.4" x:Top="0.5"/></PageSetup>
+   <Print><ValidPrinterInfo/><PaperSizeIndex>9</PaperSizeIndex><HorizontalResolution>600</HorizontalResolution></Print>
+   <Selected/>
+  </WorksheetOptions>
+  <AutoFilter x:Range="${range}" xmlns="urn:schemas-microsoft-com:office:excel"/>
+ </Worksheet>
+ <Worksheet ss:Name="Summary">
+  <Table ss:DefaultRowHeight="18">
+   <Column ss:AutoFitWidth="0" ss:Width="180"/><Column ss:AutoFitWidth="0" ss:Width="120"/>
+   <Row><Cell ss:StyleID="sSumHead"><Data ss:Type="String">HireGen Leads Export</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">Total leads</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${rows.length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">Columns</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${cols.length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">With HR email</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${rows.filter((r) => r.hr_email).length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">With salary</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${rows.filter((r) => r.salary_range || r.salary_min != null).length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">With location type</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${rows.filter((r) => r.location_type || r.is_work_from_home).length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">Hot leads</Data></Cell><Cell ss:StyleID="sNum"><Data ss:Type="Number">${rows.filter((r) => r.score_band === 'hot').length}</Data></Cell></Row>
+   <Row><Cell ss:StyleID="sBody"><Data ss:Type="String">Exported at</Data></Cell><Cell ss:StyleID="sBody"><Data ss:Type="String">${nowIso}</Data></Cell></Row>
+  </Table>
+  <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><Selected/></WorksheetOptions>
+ </Worksheet>
+</Workbook>`;
+}
+
 export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
@@ -69,89 +289,15 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'Invalid query parameters', details: parseResult.error.issues });
     }
     const q = parseResult.data;
+    const user = req.user as { id: string; role: string };
 
     const offset = (q.page - 1) * q.limit;
     const sql = getDB();
 
-    const conditions: string[] = [];
-    const values: unknown[] = [];
-    let paramIdx = 1;
-
-    // RBAC: sales_rep sees only assigned leads, admin sees all
-    const user = req.user as { id: string; role: string };
-    if (user.role === 'sales_rep') {
-      conditions.push(`l.assigned_to = $${paramIdx}`);
-      values.push(user.id);
-      paramIdx++;
-    }
-
-    if (q.score_band) {
-      conditions.push(`l.score_band = $${paramIdx}`);
-      values.push(q.score_band);
-      paramIdx++;
-    }
-    if (q.pipeline_stage) {
-      conditions.push(`l.pipeline_stage = $${paramIdx}`);
-      values.push(q.pipeline_stage);
-      paramIdx++;
-    }
-    if (q.source_site) {
-      conditions.push(`jp.source_site = $${paramIdx}`);
-      values.push(q.source_site);
-      paramIdx++;
-    }
-    if (q.date_from) {
-      conditions.push(`l.created_at >= $${paramIdx}::timestamptz`);
-      values.push(q.date_from);
-      paramIdx++;
-    }
-    if (q.date_to) {
-      conditions.push(`l.created_at <= $${paramIdx}::timestamptz`);
-      values.push(q.date_to);
-      paramIdx++;
-    }
-    if (q.experience) {
-      conditions.push(`jp.experience_level = $${paramIdx}`);
-      values.push(q.experience);
-      paramIdx++;
-    }
-    if (q.location_type) {
-      conditions.push(`jp.location_type = $${paramIdx}`);
-      values.push(q.location_type);
-      paramIdx++;
-    }
-    if (q.city) {
-      conditions.push(`jp.city ILIKE $${paramIdx}`);
-      values.push(`%${q.city}%`);
-      paramIdx++;
-    }
-    if (q.state) {
-      conditions.push(`jp.state ILIKE $${paramIdx}`);
-      values.push(`%${q.state}%`);
-      paramIdx++;
-    }
-    if (q.department) {
-      conditions.push(`jp.department ILIKE $${paramIdx}`);
-      values.push(`%${q.department}%`);
-      paramIdx++;
-    }
-    if (q.salary_min != null) {
-      // COALESCE lets a source that only gives text still match on its numeric
-      // floor when one exists, and excludes rows with no pay data at all.
-      conditions.push(`COALESCE(jp.salary_min, NULL) >= $${paramIdx}`);
-      values.push(q.salary_min);
-      paramIdx++;
-    }
-    if (q.has_salary === true) {
-      conditions.push(`(jp.salary_min IS NOT NULL OR COALESCE(jp.salary_range, '') <> '')`);
-    } else if (q.has_salary === false) {
-      conditions.push(`(jp.salary_min IS NULL AND COALESCE(jp.salary_range, '') = '')`);
-    }
-    if (q.filter) {
-      conditions.push(`(c.name ILIKE $${paramIdx} OR c.domain ILIKE $${paramIdx} OR jp.title ILIKE $${paramIdx})`);
-      values.push(`%${q.filter}%`);
-      paramIdx++;
-    }
+    const { conditions, values } = buildLeadFilters(q, user);
+    // Each pushed value consumed exactly one placeholder, so the next free $n
+    // is one past the number bound so far.
+    let paramIdx = values.length + 1;
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderDir = q.sort_order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
@@ -958,6 +1104,58 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
       return { lead: result[0] };
+    },
+  );
+
+  // Full-fidelity export of every lead matching the current filters -- not the 25
+  // rows on screen. Emits SpreadsheetML 2003: opens natively in Excel/LibreOffice
+  // with a styled frozen header, autofilter and column widths, without adding an
+  // xlsx dependency for what is one template string.
+  fastify.get(
+    '/export',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const parseResult = paginationSchema.safeParse({
+        ...(req.query as Record<string, unknown>), page: 1, limit: 200,
+      });
+      if (!parseResult.success) {
+        return reply.status(400).send({ error: 'Invalid query parameters' });
+      }
+      const q = parseResult.data;
+      const user = req.user as { id: string; role: string };
+      const sql = getDB();
+      const { conditions, values } = buildLeadFilters(q, user);
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      // No LIMIT: the point of this route is completeness across all pages.
+      const rows = await sql.unsafe(`
+        SELECT
+          l.id, l.lead_score, l.score_band, l.pipeline_stage, l.data_quality,
+          l.email_status, l.whatsapp_status, l.do_not_contact, l.assigned_to,
+          l.created_at, l.updated_at,
+          jp.source_site, jp.title AS job_title,
+          jp.job_url, jp.apply_url, jp.salary_range, jp.experience_level,
+          jp.location, jp.city, jp.state, jp.country, jp.location_type,
+          jp.employment_type, jp.is_work_from_home, jp.posted_at,
+          jp.department, jp.openings_count,
+          jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period,
+          c.name as company_name, c.domain as company_domain,
+          hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
+          hc.personal_email as hr_email, hc.personal_mobile as hr_mobile
+        FROM leads l
+        JOIN companies c ON l.company_id = c.id
+        JOIN job_postings jp ON l.job_posting_id = jp.id
+        LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+        ${whereClause}
+        ORDER BY l.created_at DESC
+      `, values as any);
+
+      const xml = buildLeadsWorkbook(rows as any[], (user as any).email ?? '');
+      return reply
+        .header('Content-Type', 'application/vnd.ms-excel')
+        .header('Content-Disposition',
+          `attachment; filename="hiregen-leads-${new Date().toISOString().slice(0, 10)}.xls"`)
+        .send(xml);
     },
   );
 

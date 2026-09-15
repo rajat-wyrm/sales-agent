@@ -28,7 +28,9 @@ const RANK: Record<string, number> = {
 const FAILURE_ENTRY: Record<string, string[]> = {
   enrichment_failed: ['discovered', 'enriching'],
   verification_failed: ['enriched', 'verifying'],
-  contact_unavailable: ['discovered', 'enriching', 'enriched', 'verifying'],
+  // Re-enriching a lead whose verification later failed can discover it has no
+  // usable contact at all, so that exit is legal (mirror of 020_leads_stage_transition.sql).
+  contact_unavailable: ['discovered', 'enriching', 'enriched', 'verifying', 'verification_failed'],
   send_failed: ['verified', 'ready_for_outreach', 'message_generated', 'drafted', 'send_pending'],
   provider_error: ['verified', 'ready_for_outreach', 'message_generated', 'drafted', 'send_pending'],
   bounced: ['sent', 'contacted', 'delivered'],
