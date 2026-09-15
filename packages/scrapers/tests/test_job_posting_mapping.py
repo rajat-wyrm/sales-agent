@@ -178,7 +178,10 @@ def test_object_labels_are_preferred_over_ids():
         "typeOfEmployment": {"id": "permanent", "label": "Full-time"},
         "function": {"id": "engineering", "label": "Engineering"},
         "workplaceType": "Hybrid"}})
-    assert c["employment_type"] == "full-time"
+    # The DB CHECK demands the canonical enum, so the extracted label
+    # ("Full-time") is mapped, not stored verbatim (verbatim == constraint
+    # violation at insert time).
+    assert c["employment_type"] == "full_time"
     assert c["department"] == "Engineering"
     assert c["location_type"] == "hybrid"
 

@@ -789,6 +789,20 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
     employment_raw = (_label_of(raw.get("typeOfEmployment")) or _label_of(raw.get("employment_type"))
                       or _label_of(raw.get("employmentType")) or _label_of(raw.get("jobType"))
                       or _label_of(raw.get("job_type"))).lower()
+    # job_postings_employment_type_chk demands the canonical enum; sources arrive
+    # as free text ("Full-time", "Permanent", "Contractual"). Anything unmapped
+    # falls to 'unspecified' -- which the enum carves out for exactly that.
+    _emp_key = employment_raw.replace("-", " ").replace("_", " ").strip()
+    _EMPLOYMENT_MAP = {
+        "full time": "full_time", "permanent": "full_time",
+        "part time": "part_time",
+        "contract": "contract", "contractual": "contract", "contractor": "contract",
+        "internship": "internship", "intern": "internship",
+        "apprenticeship": "apprenticeship",
+        "freelance": "freelance", "freelancer": "freelance",
+        "temporary": "temporary", "temp": "temporary",
+        "unspecified": "unspecified",
+    }
     wt_map = {
         "remote": "remote", "work from home": "remote", "wfh": "remote",
         "onsite": "onsite", "on-site": "onsite", "office": "onsite",
@@ -943,7 +957,7 @@ def job_posting_columns(normalized: dict[str, Any]) -> dict[str, Any]:
         "state": (raw.get("state") or "").strip() or None,
         "country": (raw.get("country") or "").strip() or None,
         "location_type": location_type,
-        "employment_type": employment_raw or None,
+        "employment_type": _EMPLOYMENT_MAP.get(_emp_key, "unspecified") if _emp_key else None,
         "is_work_from_home": location_type == "remote",
         "apply_url": (str(raw.get("apply_url") or raw.get("applyUrl") or raw.get("application_url") or "").strip()
                       or normalized.get("job_url") or None),
