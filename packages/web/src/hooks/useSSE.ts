@@ -163,7 +163,15 @@ export function subscribeRealtime(cb: Listener): () => void {
   listeners.add(cb);
   return () => {
     listeners.delete(cb);
-    if (listeners.size === 0) teardown();
+    if (listeners.size > 0) return;
+    // Defer the close by a macrotask. StrictMode's mount -> cleanup -> remount all
+    // happen in one tick, so an immediate teardown closed a stream that a listener had
+    // already re-subscribed to on the next line, leaving the app permanently deaf with
+    // no error surfaced. A genuine unmount (logout, last page navigating away) still
+    // closes it one task later, which is indistinguishable to the server.
+    setTimeout(() => {
+      if (listeners.size === 0) teardown();
+    }, 0);
   };
 }
 
@@ -218,6 +226,18 @@ export function setRealtimeToken(token: string | null) {
   open();
 }
 
+/** Live diagnostics for debugging a silent stream; also set on window in dev. */
+export function realtimeDiagnostics() {
+  return {
+    hasToken: !!currentToken,
+    visible,
+    listeners: listeners.size,
+    sourceState: source ? source.readyState : null,
+    retryScheduled: !!retryTimer,
+    attempt,
+  };
+}
+
 export function realtimeConnected(): boolean {
   return source !== null && source.readyState === EventSource.OPEN;
 }
@@ -234,11 +254,14 @@ export function useSSE(_url: string, onEvent?: (event: SSEEvent) => void) {
   }
 
   useEffect(() => {
-    // The auth store is the only source of truth for the token. A page mounting
-    // while signed out must not tear down a stream another part of the app owns,
-    // so only drive the socket when there is something to drive it with.
-    if (token) setRealtimeToken(token);
+    // Subscribe BEFORE publishing the token. React StrictMode mounts, cleans up and
+    // remounts every effect in development and in this production build; with the old
+    // order the first pass opened the socket and its cleanup then dropped the listener
+    // count to zero, which tore the stream down -- and because the token never changed
+    // again, nothing ever reopened it. Result: realtime silently off, no events, no
+    // error anywhere.
     const unsubscribe = subscribeRealtime(throttled.current!);
+    if (token) setRealtimeToken(token);
     return unsubscribe;
   }, [token]);
 
