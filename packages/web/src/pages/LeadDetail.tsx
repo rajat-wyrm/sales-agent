@@ -306,6 +306,13 @@ const LeadDetail: React.FC = () => {
           ? 'OSINT fallback searches public sources for contact info. Lowest confidence. Free — no credits.'
           : 'Auto: ContactOut → Snov.io → OSINT. Paid providers run per-row on your click only — no credits consumed until you click Enrich.';
 
+// Values that behave like enums (single word, safe to title-case for display).
+const ENUM_LIKE_KEYS = new Set([
+  'Workplace', 'Employment', 'Experience', 'Openings', 'Posted',
+  'Contact confidence', 'Last updated', 'Data quality', 'Stage',
+  'Score', 'Band', 'Pipeline Stage', 'Email Status', 'WhatsApp Status',
+]);
+
   return (
     <div className="space-y-phi4">
       <div>
@@ -475,7 +482,10 @@ const LeadDetail: React.FC = () => {
               ].map(([k, v]) => (
                 <div key={k} className="flex items-start justify-between gap-4 py-2.5">
                   <dt className="text-muted-foreground">{k}</dt>
-                  <dd className="text-right font-medium text-foreground capitalize">{v}</dd>
+                  {/* Emails, URLs and salary strings are mangled by CSS capitalize;
+                      only enum-like labels are safe to title-case. */}
+                  <dd className={`text-right font-medium text-foreground${
+                    ENUM_LIKE_KEYS.has(k as string) ? ' capitalize' : ''}`}>{v}</dd>
                 </div>
               ))}
               {/* Posting facets the scrapers captured but never surfaced. Applied
@@ -503,6 +513,10 @@ const LeadDetail: React.FC = () => {
                 // Compliance fields: populated on every lead yet never shown, so a
                 // rep could not see the lawful basis for contacting someone or that
                 // this row duplicates another one.
+                // assignedLabel was computed from the users list for a long time and
+                // never rendered, so ownership was invisible on the detail page.
+                ['Owner', assignedLabel && assignedLabel !== 'Unassigned'
+                  && !/^[0-9a-f-]{36}$/.test(assignedLabel) ? assignedLabel : null],
                 ['Legal basis', lead.legal_basis],
                 ['Processing purpose', lead.processing_purpose],
                 ['Website', lead.website_url],
@@ -513,7 +527,11 @@ const LeadDetail: React.FC = () => {
               ].filter(([, v]) => v).map(([k, v]) => (
                 <div key={k} className="flex items-start justify-between gap-4 py-2.5">
                   <dt className="text-muted-foreground">{k}</dt>
-                  <dd className="text-right font-medium capitalize text-foreground">{v}</dd>
+                  {/* Only genuinely enum-like values are capitalised: emails, URLs,
+                      salary strings and department names get mangled by CSS
+                      capitalize (e.g. qa-probe@example.com -> Qa-Probe@Example.Com). */}
+                  <dd className={`text-right font-medium text-foreground${
+                    ENUM_LIKE_KEYS.has(k as string) ? ' capitalize' : ''}`}>{v}</dd>
                 </div>
               ))}
               {(lead.apply_url || lead.job_url) && (

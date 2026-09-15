@@ -188,7 +188,7 @@ const LEAD_EXPORT_COLUMNS: Array<{
   { header: 'Posted', get: (r) => r.posted_at, type: 'DateTime', width: 18 },
   { header: 'Discovered', get: (r) => r.created_at, type: 'DateTime', width: 18 },
   { header: 'Updated', get: (r) => r.updated_at, type: 'DateTime', width: 18 },
-  { header: 'Assigned To', get: (r) => r.assigned_to, width: 22 },
+  { header: 'Assigned To', get: (r) => r.assigned_to_email || r.assigned_to || '', width: 26 },
   { header: 'Do Not Contact', get: (r) => (r.do_not_contact ? 'YES' : 'no'), width: 14 },
   { header: 'Lead ID', get: (r) => r.id, width: 36 },
 ];
@@ -352,11 +352,15 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period,
         c.name as company_name, c.domain as company_domain,
         hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
-        hc.personal_email as hr_email, hc.personal_mobile as hr_mobile
+        hc.personal_email as hr_email, hc.personal_mobile as hr_mobile,
+        -- assigned_to alone is a bare UUID; without the owner's email the column is
+        -- unreadable in the UI and meaningless in an exported spreadsheet.
+        au.email as assigned_to_email
       FROM leads l
       JOIN companies c ON l.company_id = c.id
       JOIN job_postings jp ON l.job_posting_id = jp.id
       LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+      LEFT JOIN users au ON au.id = l.assigned_to
       ${whereClause}
       ORDER BY ${sortColumn} ${orderDir}${nullsTail}
       LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
@@ -1141,11 +1145,13 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
           jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period,
           c.name as company_name, c.domain as company_domain,
           hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
-          hc.personal_email as hr_email, hc.personal_mobile as hr_mobile
+          hc.personal_email as hr_email, hc.personal_mobile as hr_mobile,
+          au.email as assigned_to_email
         FROM leads l
         JOIN companies c ON l.company_id = c.id
         JOIN job_postings jp ON l.job_posting_id = jp.id
         LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
+        LEFT JOIN users au ON au.id = l.assigned_to
         ${whereClause}
         ORDER BY l.created_at DESC
       `, values as any);

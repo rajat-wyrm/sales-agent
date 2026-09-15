@@ -79,7 +79,8 @@ const EXPORT_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['Posted At', (r) => r.posted_at],
   ['Discovered At', (r) => r.created_at],
   ['Updated At', (r) => r.updated_at],
-  ['Assigned To', (r) => r.assigned_to],
+  ['Assigned To', (r) => r.assigned_to_email || r.assigned_to],
+  ['Data Quality', (r) => r.data_quality],
   ['Do Not Contact', (r) => (r.do_not_contact ? 'YES' : 'no')],
   ['Lead ID', (r) => r.id],
 ];
@@ -106,6 +107,7 @@ const ALL_COLUMNS = [
   { id: 'job_title', label: 'Job Title' }, { id: 'role', label: 'Role' },
   { id: 'location', label: 'Location' }, { id: 'salary', label: 'Salary' },
   { id: 'hr_name', label: 'HR Contact' },
+  { id: 'assigned', label: 'Owner' },
   { id: 'verification', label: 'Verification' }, { id: 'stage', label: 'Stage' },
   { id: 'source_site', label: 'Source' }, { id: 'posted_at', label: 'Posted' },
   { id: 'created_at', label: 'Discovered' }, { id: 'posting_link', label: 'Apply Link' },
@@ -302,6 +304,14 @@ const Leads: React.FC = () => {
       return lead.hr_name ? (
         <div className="flex items-center gap-2.5"><Avatar name={lead.hr_name} size="sm" /><div className="min-w-0"><p className="truncate text-[13px] font-medium">{lead.hr_name}</p>{lead.hr_email && <p className="truncate text-xs text-muted-foreground">{lead.hr_email}</p>}</div></div>
       ) : <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning"><Sparkles className="h-3 w-3" />needs enrichment</span>;
+    } }),
+    // Ownership was invisible in the table even though every lead can be assigned;
+    // a rep scanning a queue cannot tell which rows are theirs.
+    columnHelper.display({ id: 'assigned', header: 'Owner', cell: ({ row }) => {
+      const l = row.original as any;
+      const who = l.assigned_to_email || l.assigned_to;
+      return who ? <span className="block max-w-[170px] truncate text-[12px] text-muted-foreground" title={String(who)}>{String(who).split('@')[0]}</span>
+        : <span className="text-[12px] text-muted-foreground/60">Unassigned</span>;
     } }),
     columnHelper.display({ id: 'verification', header: 'Verification', cell: ({ row }) => {
       const lead = row.original; const em = emailStatusMeta(lead.email_status); const wm = whatsappStatusMeta(lead.whatsapp_status);
