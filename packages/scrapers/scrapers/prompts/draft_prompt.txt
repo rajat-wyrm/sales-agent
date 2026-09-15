@@ -38,3 +38,12 @@ About Job: {about_job}
 HR Name: {hr_name}
 Salary Range: {salary_range}
 Job URL: {job_url}
+
+PRIOR CORRESPONDENCE with this company (oldest first; empty means we have never
+emailed them, so write as a genuine first contact):
+{prior_correspondence}
+
+If the section above contains a reply from them, you are writing a FOLLOW-UP, not a
+first touch: acknowledge what they said, answer any objection or question in it, and
+do not repeat our pitch verbatim. If their reply asked us to stop contacting them,
+output an empty body instead of drafting.

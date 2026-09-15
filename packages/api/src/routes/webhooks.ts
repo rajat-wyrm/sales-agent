@@ -247,6 +247,48 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         [messageId],
       );
 
+      // Keep what they actually said. Previously only the status flipped, so a
+      // follow-up could not see an objection or an unsubscribe request. Best-effort:
+      // a failure here must not break reply tracking above.
+      try {
+        const header = (data.headers || {}) as Record<string, unknown>;
+        const from = String(data.from || header.from || recipient || '').trim();
+        const subject = String(data.subject || '').slice(0, 500);
+        const body = String(
+          data.text || (data as any).html || header['text/plain'] || '',
+        ).slice(0, 20000);
+        if (body) {
+          const lower = `${subject}\n${body}`.toLowerCase();
+          // Phrasing variants people actually use; a missed one only delays the
+          // suppression until a human reads the thread, whereas a false positive
+          // silently kills a live lead -- so keep this deliberately narrow.
+          const wantsOut =
+            /\bunsubscribe\b|\bopt[ -]?out\b|\bdo ?n[o']?t contact\b|\bstop contacting\b|\bremove me\b|\bnot interested\b|\bdelist\w*\b/.test(
+              lower,
+            );
+          await sql.unsafe(
+            `INSERT INTO inbound_messages
+               (lead_id, outreach_log_id, channel, sender_identity, subject,
+                body_text, provider_message_id, is_unsubscribe, raw_payload)
+             SELECT $1, o.id, 'email', $2, $3, $4, $1, $5, $6::jsonb
+             FROM outreach_log o WHERE o.provider_message_id = $1 LIMIT 1`,
+            [messageId, from || null, subject || null, body, wantsOut,
+             JSON.stringify({ event_type: type })],
+          );
+          if (wantsOut) {
+            // Honour it immediately rather than waiting for a human to read it.
+            await sql.unsafe(
+              `UPDATE leads SET do_not_contact = TRUE, pipeline_stage = 'suppressed'
+               WHERE id = (SELECT lead_id FROM outreach_log WHERE provider_message_id = $1 LIMIT 1)
+                 AND pipeline_stage NOT IN ('converted', 'suppressed')`,
+              [messageId],
+            );
+          }
+        }
+      } catch (err) {
+        req.log.warn({ err }, 'inbound message capture failed');
+      }
+
       await logAuditEvent({
         user_id: null,
         action: 'email_reply_received',

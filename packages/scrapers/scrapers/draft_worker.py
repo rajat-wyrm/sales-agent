@@ -126,6 +126,7 @@ async def generate_gemini_drafts(
             "department": lead_data.get("department", "") or "",
             "openings_count": ("" if lead_data.get("openings_count") is None
                                else str(lead_data["openings_count"])),
+            "prior_correspondence": lead_data.get("prior_correspondence", "") or "",
         })
 
         model = genai.GenerativeModel(
@@ -194,9 +195,43 @@ async def process_draft_job(
             logger.warning(f"Lead not found: {lead_id}")
             return
 
+        # Prior correspondence, so a follow-up acknowledges what already happened
+        # instead of reading like the first message. Outbound comes from the existing
+        # outreach_log -> outreach_drafts join (no new table); inbound comes from
+        # inbound_messages, which only exists because replies used to be discarded.
+        try:
+            prior_rows = await conn.fetch(
+                """
+                SELECT 'us' AS who, COALESCE(d.subject, '') AS subject,
+                       COALESCE(d.body, '') AS body, o.sent_at AS at
+                  FROM outreach_log o
+                  JOIN outreach_drafts d ON d.id = o.draft_id
+                 WHERE o.lead_id = $1
+                UNION ALL
+                SELECT 'them', COALESCE(subject, ''), body_text, received_at
+                  FROM inbound_messages WHERE lead_id = $1
+                ORDER BY at DESC
+                LIMIT 6
+                """,
+                lead_id,
+            )
+        except Exception as e:  # noqa: BLE001  (context is optional; never block a draft)
+            logger.debug(f"prior correspondence unavailable for {lead_id}: {e}")
+            prior_rows = []
+        transcript_lines = []
+        for r in reversed(prior_rows):
+            snippet = " ".join((r["body"] or "").split())[:280]
+            if not snippet:
+                continue
+            speaker = "We sent" if r["who"] == "us" else "They replied"
+            subj = f" [subject: {r['subject'][:80]}]" if r["subject"] else ""
+            transcript_lines.append(f"{speaker}{subj}: {snippet}")
+        prior_correspondence = "\n".join(transcript_lines[-4:])
+
         lead_data = {
             "company_name": lead["company_name"],
             "about_company": lead["about_company"] or "",
+            "prior_correspondence": prior_correspondence,
             "job_title": lead["job_title"],
             "about_job": lead["about_job"] or "",
             "hr_name": lead["hr_name"] or "",

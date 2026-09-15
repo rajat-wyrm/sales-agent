@@ -17,7 +17,7 @@ from scrapers.draft_worker import DRAFT_PROMPT_TEMPLATE  # noqa: E402
 PLACEHOLDERS = {
     "company_name", "job_title", "experience_level", "about_company", "about_job",
     "hr_name", "salary_range", "job_url", "location", "workplace_type",
-    "department", "openings_count",
+    "department", "openings_count", "prior_correspondence",
 }
 
 
