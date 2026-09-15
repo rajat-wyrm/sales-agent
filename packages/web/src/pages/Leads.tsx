@@ -12,7 +12,7 @@ import { Lead } from '@/lib/types';
 import {
   Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles, MapPin,
   BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle, MoreVertical,
-  Columns3, LayoutGrid, Download, Zap, ExternalLink, Phone, Copy, Check, Radar,
+  Columns3, LayoutGrid, Download, Zap, Loader2, CheckCircle2, ExternalLink, Phone, Copy, Check, Radar,
 } from 'lucide-react';
 import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import { useAuthStore } from '@/stores/auth';
@@ -200,6 +200,16 @@ const Leads: React.FC = () => {
 
   const enrich = (id: string, provider: string) => runAction(leadsApi.enrich(id, provider), provider === 'auto' ? 'Full-army enrichment started' : `${provider} enrichment started`);
 
+  // Which action is in flight for which row, so the pressed button can show a spinner
+  // instead of looking dead for the few hundred ms until the list refetches.
+  const [busy, setBusy] = useState<Record<string, string>>({});
+  const act = (leadId: string, kind: string, fn: Promise<unknown>, msg: string) => {
+    setBusy((b) => ({ ...b, [leadId]: kind }));
+    return runAction(fn, msg).finally(() => {
+      setBusy((b) => { const n = { ...b }; delete n[leadId]; return n; });
+    });
+  };
+
   const bulkEnrichMutation = useMutation(
     ({ ids, provider }: { ids: string[]; provider: string }) => Promise.all(ids.map((id) => leadsApi.enrich(id, provider))),
     { onSuccess: (_r, v) => { toast({ title: `Enrichment started`, description: `${v.ids.length} leads → ${v.provider}`, variant: 'success' }); setSelectedIds(new Set()); queryClient.invalidateQueries('leads'); }, onError: (e) => toast({ title: 'Bulk enrich failed', description: (e as Error).message, variant: 'error' }) },
@@ -355,18 +365,47 @@ const Leads: React.FC = () => {
       ) : <span className="text-[12px] text-muted-foreground">—</span>;
     } }),
     columnHelper.accessor('created_at', { header: 'Discovered', cell: (info) => <span className="text-[13px] text-muted-foreground">{formatDate(info.getValue())}</span> }),
-    columnHelper.display({ id: 'actions', header: () => <MoreVertical className="h-4 w-4 text-muted-foreground" />, cell: ({ row }) => {
+    // Three-dot menus hid every action behind a click, so nothing was discoverable and
+    // "Enrich via..." was a dead item that did nothing. These are labelled badges now:
+    // each shows its own spinner while running, and the menu is kept only for the
+    // provider picker and rarely-used toggles.
+    columnHelper.display({ id: 'actions', header: () => <span className="sr-only">Actions</span>, cell: ({ row }) => {
       const lead = row.original;
+      const pending = busy[lead.id];
+      // Once a message is out, re-running enrich/verify/draft on the row is noise.
+      const done = (['contacted', 'replied', 'converted'] as string[]).includes(lead.pipeline_stage);
       return (
         <div className="flex items-center justify-end gap-1">
-          <Button onClick={(e) => { e.stopPropagation(); navigate(`/leads/${lead.id}`); }} variant="ghost" size="icon-sm" title="Open"><Eye className="h-4 w-4" /></Button>
-          <Menu ariaLabel="Row actions" align="end" trigger={<span className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"><MoreVertical className="h-4 w-4" /></span>} items={[
-            { label: 'View full details', icon: <Eye />, onSelect: () => navigate(`/leads/${lead.id}`) },
-            { label: 'Enrich via…', icon: <Sparkles />, onSelect: () => {} },
-            ...ENRICH_PROVIDERS.map((p) => ({ label: `  ${p.label}`, hint: p.hint, icon: <Zap />, onSelect: () => enrich(lead.id, p.key) })),
-            { label: 'Verify contacts', icon: <BadgeCheck />, onSelect: () => runAction(leadsApi.verify(lead.id), 'Verification started') },
-            { label: 'Generate draft', icon: <FileText />, onSelect: () => runAction(leadsApi.draft(lead.id, 'both'), 'Draft started') },
-            { label: lead.do_not_contact ? 'Allow contact' : 'Mark Do-Not-Contact', icon: <XCircle />, danger: !lead.do_not_contact, onSelect: () => runAction(leadsApi.setDoNotContact(lead.id, !lead.do_not_contact), 'Updated') },
+          {done ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
+              <CheckCircle2 className="h-3 w-3" />{lead.pipeline_stage === 'replied' ? 'Replied' : 'Contacted'}
+            </span>
+          ) : (
+            <>
+              <ActionChip
+                icon={Sparkles} label="Enrich" tone="primary"
+                busy={pending === 'enrich'} disabled={!!pending}
+                title="Run the free OSINT army to find an HR contact"
+                onClick={() => act(lead.id, 'enrich', leadsApi.enrich(lead.id, 'auto'), 'Enrichment started')}
+              />
+              <ActionChip
+                icon={BadgeCheck} label="Verify" tone="info"
+                busy={pending === 'verify'} disabled={!!pending}
+                title="Check the contact's email and WhatsApp"
+                onClick={() => act(lead.id, 'verify', leadsApi.verify(lead.id), 'Verification started')}
+              />
+              <ActionChip
+                icon={FileText} label="Draft" tone="success"
+                busy={pending === 'draft'} disabled={!!pending}
+                title="Write the outreach email and WhatsApp message"
+                onClick={() => act(lead.id, 'draft', leadsApi.draft(lead.id, 'both'), 'Draft started')}
+              />
+            </>
+          )}
+          <Menu ariaLabel="More row actions" align="end" trigger={<span className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" role="button" tabIndex={0}><MoreVertical className="h-4 w-4" /></span>} items={[
+            { label: 'Open full record', icon: <Eye />, onSelect: () => navigate(`/leads/${lead.id}`) },
+            ...ENRICH_PROVIDERS.map((pc) => ({ label: `Enrich · ${pc.label}`, hint: pc.hint, icon: <Zap />, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, pc.key), `${pc.label} enrichment started`) })),
+            { label: lead.do_not_contact ? 'Allow contact again' : 'Mark Do-Not-Contact', icon: <XCircle />, danger: !lead.do_not_contact, onSelect: () => act(lead.id, 'dnc', leadsApi.setDoNotContact(lead.id, !lead.do_not_contact), lead.do_not_contact ? 'Contact allowed' : 'Marked do-not-contact') },
           ]} />
         </div>
       );
@@ -444,6 +483,9 @@ const Leads: React.FC = () => {
                 <tr key={hg.id}>
                   {hg.headers.map((header) => {
                     const canSort = header.column.getCanSort();
+                    // Actions must stay reachable while the wide table scrolls sideways;
+                    // otherwise every row's buttons sit off-screen on a laptop.
+                    const pinRight = header.id === 'actions';
                     const active = header.column.getIsSorted();
                     return (
                       <th key={header.id} onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
@@ -452,7 +494,7 @@ const Leads: React.FC = () => {
                           role={canSort ? 'button' : undefined}
                           onKeyDown={canSort ? (e) => {
                             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); header.column.getToggleSortingHandler()?.(e); }
-                          } : undefined} style={{ width: header.getSize() }} className={`table-th sticky top-0 bg-surface/90 backdrop-blur-xl ${canSort ? 'cursor-pointer select-none hover:text-foreground' : ''}`}>
+                          } : undefined} style={{ width: header.getSize() }} className={`${pinRight ? 'sticky right-0 z-30 bg-surface shadow-[-6px_0_10px_-8px_rgba(0,0,0,0.35)]' : ''} table-th sticky top-0 bg-surface/90 backdrop-blur-xl ${canSort ? 'cursor-pointer select-none hover:text-foreground' : ''}`}>
                         <span className="inline-flex items-center gap-1">
                           {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
                           {canSort && <span className="inline-flex flex-col">{active === 'asc' ? <ChevronUp className="h-3 w-3 text-primary" /> : active === 'desc' ? <ChevronDown className="h-3 w-3 text-primary" /> : <ChevronUp className="h-3 w-3 opacity-30" />}</span>}
@@ -472,7 +514,7 @@ const Leads: React.FC = () => {
                 return (
                   <React.Fragment key={row.id}>
                     <tr onClick={() => toggleExpand(row.original.id)} className={`group cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-accent/50 ${selectedIds.has(row.original.id) ? 'bg-primary-soft/30' : ''}`}>
-                      {row.getVisibleCells().map((cell) => <td key={cell.id} className={`table-td ${pad}`}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
+                      {row.getVisibleCells().map((cell) => <td key={cell.id} className={`table-td ${pad}${cell.column.id === 'actions' ? ' sticky right-0 z-20 bg-surface shadow-[-6px_0_10px_-8px_rgba(0,0,0,0.35)]' : ''}`}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                     </tr>
                     <AnimatePresence initial={false}>
                       {open && (
@@ -512,6 +554,34 @@ const Leads: React.FC = () => {
 function DetailBlock({ title, children }: { title: string; children: React.ReactNode }) {
   return <div><p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</p><div className="space-y-1">{children}</div></div>;
 }
+/** Inline row action: icon + word, its own spinner while pending. A bare icon
+    button hid what each action did; a full-size Button made the row 40px tall. */
+const CHIP_TONES: Record<string, string> = {
+  primary: 'border-primary/25 bg-primary/[0.07] text-primary hover:bg-primary/15',
+  info: 'border-info/25 bg-info/[0.07] text-info hover:bg-info/15',
+  success: 'border-success/25 bg-success/[0.07] text-success hover:bg-success/15',
+};
+
+function ActionChip({ icon: Icon, label, tone, busy, disabled, title, onClick }: {
+  icon: React.ComponentType<{ className?: string }>; label: string;
+  tone: keyof typeof CHIP_TONES | string; busy?: boolean; disabled?: boolean;
+  title: string; onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={`${label}: ${title}`}
+      disabled={disabled}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-[3px] text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${CHIP_TONES[tone] || CHIP_TONES.primary}`}
+    >
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
+      <span className="hidden xl:inline">{busy ? '…' : label}</span>
+    </button>
+  );
+}
+
 function KV({ k, v, link, mailto, copyable }: { k: string; v?: string | null; link?: boolean; mailto?: boolean; copyable?: boolean }) {
   const [copied, setCopied] = useState(false);
   const show = v && v !== '—';
