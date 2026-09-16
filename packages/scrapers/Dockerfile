@@ -13,9 +13,11 @@ WORKDIR /app
 # Real headless Chromium so the escalating fetch layer can render JS-heavy /
 # anti-bot India portals (Apna flight data, LinkedIn/Indeed guest, WorkIndia,
 # Hirist) and so the OSINT cascade can read public profiles. `--with-deps`
-# installs the system libraries chromium needs on slim; `--only-shell` keeps the
-# image smaller (headless shell is enough for scraping).
-RUN python -m playwright install --with-deps chromium
+# installs the system libraries chromium needs on slim. Apt lists are removed
+# in the same layer so they never ship in the image.
+RUN python -m playwright install --with-deps chromium \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/* /root/.cache
 
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app

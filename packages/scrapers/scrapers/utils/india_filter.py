@@ -141,6 +141,7 @@ _JOB_BOARD_HOSTS = {
     "indeed.com", "indeed.co.in", "apna.co", "workindia.in", "hirist.in",
     "hirist.tech", "classicjobs.in", "unstop.com", "iimjobs.com",
     "jobinsider.in", "timesjobs.com", "glassdoor.co.in", "glassdoor.com",
+    "elitmus.com", "freejobalert.com",
     "wellfound.com", "angel.co", "linkedin.com", "akunamatata.live",
     "monster.com", "quikr.com", "jobs.quikr.com", "olx.in", "dice.com",
     "ziprecruiter.com", "careerbuilder.com", "simplyhired.com",

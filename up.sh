@@ -6,27 +6,30 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "==> Starting SSH server..."
-if ! ss -tln | grep -q ':22 '; then
-  sudo systemctl start ssh 2>/dev/null || sudo systemctl start sshd
+if [ ! -f .env ]; then
+  cp .env.example .env
+  echo "==> Created .env from .env.example — review ADMIN_EMAIL/ADMIN_PASSWORD and API keys in it."
 fi
 
 echo "==> Building images & starting stack (postgres, redis, api, web, workers, reacher, n8n)..."
 docker compose up -d --build
 
 echo "==> Applying database migrations (idempotent; waits for postgres)..."
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+for i in $(seq 1 20); do
   if docker compose exec -T api npm run --silent migrate 2>/dev/null; then
     echo "    migrations applied"; break
   fi
-  echo "    db/api not ready yet, retrying ($i/15)..."; sleep 3
+  echo "    db/api not ready yet, retrying ($i/20)..."; sleep 3
 done
 
 echo "==> Bootstrapping admin account (idempotent, reads ADMIN_EMAIL/ADMIN_PASSWORD from .env)..."
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if docker compose exec -T api npm run --silent seed:admin 2>/dev/null; then break; fi
+for i in $(seq 1 10); do
+  if docker compose exec -T api npm run --silent seed:admin:dist 2>/dev/null; then break; fi
   echo "    api not ready yet, retrying ($i/10)..."; sleep 3
 done
 
 echo "==> Status:"
 docker compose ps
+echo ""
+echo "    web  http://localhost:5173"
+echo "    api  http://localhost:3000/health"

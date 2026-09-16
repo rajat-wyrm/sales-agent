@@ -135,6 +135,7 @@ export function parseDelimited(text: string): string[][] {
 }
 
 const ALIASES: Record<string, string[]> = {
+  lead_id: ['lead_id', 'lead id', 'id'],
   company_name: ['company_name', 'company', 'organization', 'employer', 'account name', 'company name', 'client'],
   company_domain: ['company_domain', 'domain', 'company domain', 'website domain'],
   website_url: ['website_url', 'website', 'company website', 'url'],
@@ -187,12 +188,22 @@ export function matchHeader(header: string): string | null {
   return null;
 }
 
-export const IMPORT_MINIMUM_FIELDS = ['company_name', 'job_title', 'job_url', 'hr_name', 'hr_email'];
+export const IMPORT_MINIMUM_FIELDS = ['lead_id', 'company_name', 'job_title', 'job_url', 'hr_name', 'hr_email'];
 
 export interface ParsedImport {
   records: Array<Record<string, string>>;
   mapped: Record<string, string>;
   unmapped: string[];
+}
+
+/** True when every value in the row is just another column's name (see API registry). */
+export function isHeaderEcho(rec: Record<string, string>): boolean {
+  const filled = Object.entries(rec).filter(([, v]) => (v ?? '').trim() !== '');
+  if (filled.length === 0) return false;
+  const headers = new Set<string>();
+  for (const [field, aliases] of Object.entries(ALIASES)) headers.add(slugHeader(field));
+  const echoCount = filled.filter(([, v]) => headers.has(slugHeader(v))).length;
+  return echoCount >= 2 && echoCount === filled.length;
 }
 
 export function normaliseLeadRecords(table: string[][]): ParsedImport {
@@ -216,7 +227,77 @@ export function normaliseLeadRecords(table: string[][]): ParsedImport {
       rec[field] = v.startsWith("'") ? v.slice(1) : v;
     }
     return rec;
-  }).filter((rec) => IMPORT_MINIMUM_FIELDS.some((f) => (rec[f] ?? '') !== ''));
+  }).filter((rec) => IMPORT_MINIMUM_FIELDS.some((f) => (rec[f] ?? '') !== ''))
+    .filter((rec) => !isHeaderEcho(rec));
 
   return { records, mapped, unmapped };
+}
+
+// ---------------------------------------------------------------------------
+// SpreadsheetML (.xls exported by this app) -> CSV text, for import round-trip
+// ---------------------------------------------------------------------------
+
+const XML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+const unescapeXml = (s: string) => s.replace(/&(amp|lt|gt|quot|apos);/g, (_, e: string) => XML_ENTITIES[e]);
+
+/** True when the text is our SpreadsheetML workbook rather than CSV/TSV. */
+export function looksLikeSpreadsheetMl(text: string): boolean {
+  const head = text.slice(0, 2000);
+  return head.includes('<Workbook') || (head.includes('<?xml') && head.includes('<Row'));
+}
+
+/**
+ * Our "Export > Excel" file is SpreadsheetML XML, not binary Excel. Convert it back to
+ * CSV text so an exported file imports straight back with no new dependency. Regex-based
+ * (not DOMParser) so it also runs in workers/tests without a DOM.
+ *
+ * Skips leading non-data rows (group banner) by taking the first row with 2+ recognised
+ * headers as the header, and drops our "# / Company (row key)" prefix columns.
+ */
+export function spreadsheetMlToCsv(xml: string): string {
+  const src = xml.charCodeAt(0) === 0xfeff ? xml.slice(1) : xml;
+  const sheet =
+    /<Worksheet[^>]*ss:Name="Leads"[^>]*>([\s\S]*?)<\/Worksheet>/i.exec(src)?.[1] ??
+    /<Worksheet[^>]*>([\s\S]*?)<\/Worksheet>/i.exec(src)?.[1] ??
+    src;
+
+  const grid: string[][] = [];
+  const rowRe = /<Row[^>]*>([\s\S]*?)<\/Row>/gi;
+  let rm: RegExpExecArray | null;
+  while ((rm = rowRe.exec(sheet)) !== null) {
+    const cells: string[] = [];
+    // Self-closing <Cell .../> is an empty cell (a null value in the export); it must
+    // still honour ss:Index, otherwise every gap swallows the next cell's content.
+    const cellRe = /<Cell([^>]*?)(?:\/>|>([\s\S]*?)<\/Cell>)/gi;
+    let cm: RegExpExecArray | null;
+    while ((cm = cellRe.exec(rm[1])) !== null) {
+      const want = /ss:Index="(\d+)"/i.exec(cm[1]);
+      if (want) while (cells.length < Number(want[1]) - 1) cells.push('');
+      const data = cm[2] ? /<Data[^>]*>([\s\S]*?)<\/Data>/i.exec(cm[2]) : null;
+      cells.push(data ? unescapeXml(data[1]).replace(/\r?\n/g, ' ').trim() : '');
+    }
+    if (cells.some((c) => c !== '')) grid.push(cells);
+  }
+  if (grid.length < 2) throw new Error('No data rows found in that workbook');
+
+  // The row with the most recognised headers is the header: the group banner above it
+  // ("Identity | Job posting | …") fuzzy-matches a few aliases, and data rows can match
+  // the odd value ("Hot", "Remote"), but neither comes close to the real header row.
+  let headerIdx = 0;
+  let best = 1;
+  grid.forEach((r, i) => {
+    const n = r.filter((c) => matchHeader(c)).length;
+    if (n > best) { best = n; headerIdx = i; }
+  });
+  let rows = grid.slice(headerIdx);
+
+  // Drop our export chrome: "#" + "Company (row key)" prefix columns.
+  if (/^#?$/.test((rows[0][0] ?? '').trim()) && /row key/i.test(rows[0][1] ?? '')) {
+    rows = rows.map((r) => r.slice(2));
+  }
+
+  return rows
+    .map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(','))
+    .join('\r\n');
 }

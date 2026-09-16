@@ -160,6 +160,36 @@ async def run_osint_enrichment(
     # Tier 2: Generic company contact patterns
     domain = company_domain or company_name.lower().replace(" ", "")
 
+    # Tier 0: hiring-team discovery — most scraped fresher leads arrive with NO hr
+    # name, and every tier below gates on one, so a nameless lead used to leave
+    # with nothing. Ask the company-HR extractor (ATS APIs, career pages, dorks;
+    # sqlite-cached per company) who hires there; the discovered name then flows
+    # through the exact same verified tiers below instead of a separate path.
+    if not hr_name and company_name:
+        try:
+            import asyncio as _asyncio
+            from .utils.company_hr_extractor import extract_hr_for_company
+            found = await _asyncio.wait_for(
+                extract_hr_for_company(company_name, domain, ""), timeout=75,
+            )
+            if found.get("hr_name"):
+                hr_name = found["hr_name"]
+                result["hr_name"] = hr_name
+                result["method"] = f"hiring_team:{found.get('source', 'ats_career_dork')}"
+                try:
+                    found_conf = float(found.get("confidence", 0.5))
+                except (TypeError, ValueError):
+                    found_conf = 0.5
+                result["confidence_score"] = max(
+                    result["confidence_score"], min(70, 30 + int(found_conf * 40))
+                )
+                logger.info(f"OSINT: hiring-team discovery found {hr_name} @ {company_name}")
+            for key, out in (("hr_email", "hr_email"), ("hr_linkedin", "hr_linkedin_url")):
+                if found.get(key) and not result.get(out):
+                    result[out] = found[key]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Hiring-team discovery failed for {company_name}: {e}")
+
     # Email cascade. GitHub public-commit mining is the best FIRST-PARTY source:
     # a company's public repos expose real staff emails (name + @domain). We fetch
     # those ONCE, then use them two ways:

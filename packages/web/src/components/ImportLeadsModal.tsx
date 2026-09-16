@@ -5,9 +5,15 @@ import { leads as leadsApi, type ImportResult } from '@/lib/api';
 import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { normaliseLeadRecords, parseDelimited, type ParsedImport } from '@/lib/leadColumns';
+import { normaliseLeadRecords, parseDelimited, spreadsheetMlToCsv, looksLikeSpreadsheetMl, type ParsedImport } from '@/lib/leadColumns';
 
-const MAX_FILE_BYTES = 8 * 1024 * 1024; // ~5k rows of full-fidelity export
+// The server caps one request at ~6 MB / 5000 rows; we split larger files into chunks
+// below that and send them in sequence, summing the counts.
+// Both ceilings must hold per chunk: the server caps rows AND total characters, and a sheet
+// with long notes/description columns blows the size limit long before the row limit.
+const MAX_CHUNK_ROWS = 2000;
+const MAX_CHUNK_CHARS = 5_500_000; // under the server's 6 MB
+const MAX_FILE_BYTES = 40 * 1024 * 1024;
 
 /**
  * CSV / TSV import with automatic dedup.
@@ -29,6 +35,7 @@ export function ImportLeadsModal({
   const [parsed, setParsed] = useState<ParsedImport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<ImportResult | null>(null);
+  const [progress, setProgress] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
   const reset = () => {
@@ -65,17 +72,78 @@ export function ImportLeadsModal({
     }
     const reader = new FileReader();
     reader.onerror = () => setError('Could not read the file');
-    reader.onload = () => analyse(f.name, String(reader.result ?? ''));
-    reader.readAsText(f);
+    reader.onload = () => {
+      const bytes = new Uint8Array(reader.result as ArrayBuffer);
+      // Native Excel workbooks (xlsx = zip, old .xls = OLE) are binary: they cannot be
+      // parsed without a spreadsheet library, so say exactly what to do instead of
+      // showing a confusing "no headers matched" error. Our own HireGen .xls export is
+      // SpreadsheetML XML and imports directly (see below).
+      if ((bytes[0] === 0x50 && bytes[1] === 0x4b) || (bytes[0] === 0xd0 && bytes[1] === 0xcf)) {
+        setError('That is a native Excel workbook (.xlsx / .xls binary). Open it in Excel and Save As → CSV UTF-8, then import the CSV. Files exported from HireGen import directly.');
+        return;
+      }
+      let contents = new TextDecoder().decode(bytes);
+      if (looksLikeSpreadsheetMl(contents)) {
+        try {
+          contents = spreadsheetMlToCsv(contents);
+        } catch {
+          setError('That workbook has no readable Leads sheet. Export a fresh copy from HireGen, or save it as CSV UTF-8 first.');
+          return;
+        }
+      }
+      analyse(f.name, contents);
+    };
+    reader.readAsArrayBuffer(f);
+  };
+
+  /** Header line plus up to `size` data rows per request. */
+  const chunkText = useMemo(() => {
+    if (!text) return [] as string[];
+    const table = parseDelimited(text);
+    if (table.length < 2) return [];
+    const header = table[0];
+    const join = (rows: string[][]) => [header, ...rows].map((r) => r.map((c) => /[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c).join(',')).join('\r\n');
+    const out: string[] = [];
+    let cur: string[][] = [];
+    let curLen = 0;
+    const flush = () => { if (cur.length) { out.push(join(cur)); cur = []; curLen = 0; } };
+    for (let i = 1; i < table.length; i++) {
+      // +2 for the quotes/commas the joiner adds around each field
+      const cost = table[i].reduce((a, c) => a + c.length + 2, 0);
+      if (cur.length >= MAX_CHUNK_ROWS || (curLen + cost > MAX_CHUNK_CHARS && cur.length)) flush();
+      cur.push(table[i]);
+      curLen += cost;
+    }
+    flush();
+    return out;
+  }, [text]);
+
+  const runChunks = async (dryRunFlag: boolean): Promise<ImportResult> => {
+    const parts: ImportResult[] = [];
+    // A big file is several sequential requests; without this the button reads
+    // "Importing…" and looks frozen for the whole upload.
+    setProgress('');
+    for (let i = 0; i < chunkText.length; i++) {
+      if (chunkText.length > 1) setProgress(`batch ${i + 1} of ${chunkText.length}`);
+      parts.push(await leadsApi.importCsv({ csv: chunkText[i], dry_run: dryRunFlag }));
+    }
+    setProgress('');
+    const sum = (k: keyof ImportResult) => parts.reduce((a, p) => a + (p[k] as number), 0);
+    return {
+      total_rows: sum('total_rows'), created: sum('created'), merged: sum('merged'),
+      merged_fuzzy: sum('merged_fuzzy'), skipped: sum('skipped'),
+      columns_mapped: parts[0]?.columns_mapped ?? {}, columns_ignored: parts[0]?.columns_ignored ?? [],
+      errors: parts.flatMap((p) => p.errors),
+    };
   };
 
   const dryRun = useMutation(
-    () => leadsApi.importCsv({ csv: text, dry_run: true }),
+    () => runChunks(true),
     { onSuccess: (r) => setPlan(r), onError: (e: any) => setError(readableError(e)) },
   );
 
   const commit = useMutation(
-    () => leadsApi.importCsv({ csv: text }),
+    () => runChunks(false),
     { onSuccess: (r) => { onDone(r); reset(); onClose(); }, onError: (e: any) => setError(readableError(e)) },
   );
 
@@ -91,7 +159,7 @@ export function ImportLeadsModal({
       open={open}
       onClose={() => { if (!commit.isLoading) { reset(); onClose(); } }}
       title="Import leads from CSV"
-      description="Drop a CSV or TSV from another agency or your own sheet. Columns are matched by name and duplicates are merged automatically — nothing is imported twice."
+      description="Drop a CSV or TSV from another agency or your own sheet. Columns are matched by name and duplicates are merged automatically — re-importing an export merges onto the same leads via the Lead ID column, so nothing is ever imported twice."
       size="lg"
       footer={
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -102,11 +170,11 @@ export function ImportLeadsModal({
             <Button variant="outline" onClick={() => { reset(); onClose(); }} disabled={commit.isLoading}>Close</Button>
             <Button variant="outline" onClick={() => dryRun.mutate()} disabled={!text || dryRun.isLoading}>
               {dryRun.isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-              {dryRun.isLoading ? 'Checking…' : 'Check for duplicates'}
+              {dryRun.isLoading ? (progress ? `Checking ${progress}` : 'Checking…') : 'Check for duplicates'}
             </Button>
             <Button onClick={() => commit.mutate()} disabled={!parsed || commit.isLoading}>
               {commit.isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {commit.isLoading ? 'Importing…' : `Import ${parsed?.records.length ?? 0} leads`}
+              {commit.isLoading ? (progress ? `Importing ${progress}` : 'Importing…') : `Import ${parsed?.records.length ?? 0} leads`}
             </Button>
           </div>
         </div>
@@ -119,12 +187,15 @@ export function ImportLeadsModal({
           onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0]); }}
         >
           <input
-            ref={fileRef} type="file" accept=".csv,.tsv,.txt,text/csv" className="sr-only"
+            ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xls,text/csv,text/plain" className="sr-only"
             aria-label="Choose CSV file" onChange={(e) => onFile(e.target.files?.[0] ?? undefined)}
           />
           <FileSpreadsheet className="h-6 w-6 text-muted-foreground" />
-          <span className="text-sm font-medium">{fileName || 'Choose a .csv / .tsv file or drag it here'}</span>
-          <span className="text-xs text-muted-foreground">Excel: save as CSV UTF-8 first. Exported HireGen files import straight back.</span>
+          <span className="text-sm font-medium">{fileName || 'Choose a .csv / .tsv / HireGen .xls file or drag it here'}</span>
+          <span className="text-xs text-muted-foreground">
+            Native Excel workbooks (.xlsx): save as CSV UTF-8 first. Exported HireGen files import straight back.
+            {chunkText.length > 1 && ` Large files are sent in ${chunkText.length} batches.`}
+          </span>
         </label>
 
         {error && (

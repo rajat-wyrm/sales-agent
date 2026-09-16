@@ -41,6 +41,8 @@ FAILOVER: dict[str, list[str]] = {
     "classicjobs": ["foundit", "naukri"],
     "ambitionbox": ["foundit", "naukri", "shine"],
     "offcampus": ["internshala", "freshersworld", "unstop"],
+    "elitmus": ["freshersworld", "unstop", "offcampus"],
+    "freejobalert": ["offcampus", "freshersworld"],
     "hasjob": ["cutshort", "instahyre", "unstop"],
     "amazon": ["indeed", "jooble"],
     # ATS boards compensate within the ATS family (same employer-direct class)
@@ -66,6 +68,7 @@ FAILOVER: dict[str, list[str]] = {
 TIER1_ZERO_SENSITIVE = {
     "naukri", "internshala", "apna", "foundit",
     "greenhouse", "lever",
+    "elitmus", "freejobalert",
 }
 
 MAX_COMPENSATION_SOURCES = 4

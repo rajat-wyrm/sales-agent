@@ -80,11 +80,12 @@ export function buildLeadsWorkbook(rows: any[], requestedBy: string, truncated =
   const headerRow = `<Row ss:Height="24"><Cell ss:StyleID="sHead"><Data ss:Type="String">#</Data></Cell><Cell ss:StyleID="sHead"><Data ss:Type="String">Company (row key)</Data></Cell>${cols.map((c) =>
     `<Cell ss:StyleID="sHead"><Data ss:Type="String">${xmlEscape(c.header)}</Data></Cell>`).join('')}</Row>`;
 
-  const body = rows.map((r, i) => {
+  const renderRow = (r: any, i: number) => {
     const band = r.score_band ?? null;
     const stripe = i % 2 === 1;
     return `<Row><Cell ss:StyleID="${stripe ? 'sNumAlt' : 'sIdx'}"><Data ss:Type="Number">${i + 1}</Data></Cell><Cell ss:StyleID="${stripe ? 'sBodyAlt' : 'sBody'}"><Data ss:Type="String">${xmlEscape(r.company_name ?? '')}</Data></Cell>${cols.map((c) => cell(c, r, band, stripe)).join('')}</Row>`;
-  }).join('');
+  };
+  const body = rows.map(renderRow).join('');
 
   // Two frozen columns on the left (# and Company) plus one per data column.
   const widths = '<Column ss:AutoFitWidth="0" ss:Width="7"/><Column ss:AutoFitWidth="0" ss:Width="26"/>'

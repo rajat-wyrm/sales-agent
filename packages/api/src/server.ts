@@ -12,6 +12,9 @@ import { requestLogger, getPrometheusMetrics } from './utils/logging';
 
 const server = async () => {
   const app = Fastify({
+    // Lead imports post a chunk of parsed CSV as JSON; the 1 MB default would reject a
+    // legitimate 2000-row batch. Row count and per-value length are capped in the importer.
+    bodyLimit: Number(process.env.API_BODY_LIMIT_BYTES ?? 8 * 1024 * 1024),
     // trustProxy must match the actual trusted proxy hop count; off by default so
     // req.ip can't be spoofed via X-Forwarded-For (keeps rate-limiting honest).
     // Set TRUST_PROXY=true only when running behind a trusted reverse proxy.
@@ -33,6 +36,8 @@ const server = async () => {
   });
   await app.register(Helmet);
   await app.register(Compress);
+  // Lead imports post a chunk of parsed CSV as JSON. Fastify's 1 MB default would reject
+  // a legitimate 2000-row batch; the route caps rows and per-value length separately.
   await app.register(RateLimit, {
     max: 100,
     timeWindow: '1 minute',

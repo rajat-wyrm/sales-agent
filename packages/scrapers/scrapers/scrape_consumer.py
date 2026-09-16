@@ -70,6 +70,8 @@ SCRAPER_MAP = {
     "offcampus": ("scrapers.offcampus_aggregators", "OffCampusAggregatorsScraper"),
     "hasjob": ("scrapers.hasjob", "HasjobScraper"),
     "amazon": ("scrapers.amazon_jobs", "AmazonJobsScraper"),
+    "elitmus": ("scrapers.elitmus", "ElitmusScraper"),
+    "freejobalert": ("scrapers.freejobalert", "FreeJobAlertScraper"),
 }
 DEFAULT_SOURCES = [
     # India-native fresher/entry-level portals (primary target).
@@ -77,6 +79,7 @@ DEFAULT_SOURCES = [
     "shine", "timesjobs", "foundit", "instahyre", "cutshort",
     "unstop", "iimjobs", "jobinsider", "hirist", "classicjobs",
     "hackerearth", "ambitionbox", "offcampus", "hasjob",
+    "elitmus", "freejobalert",
     # Public ATS career pages (real employer domains; India-filtered downstream,
     # best source of postable HR contacts). Greenhouse/Lever/Workday/Ashby/etc.
     "greenhouse", "lever", "workday", "ashby", "smartrecruiters",

@@ -11,8 +11,8 @@ import { leads as leadsApi, admin, type ImportResult } from '@/lib/api';
 import { Lead } from '@/lib/types';
 import {
   Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles, MapPin,
-  BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle, MoreVertical,
-  Columns3, LayoutGrid, Download, Zap, Loader2, CheckCircle2, ExternalLink, Phone, Copy, Check, Radar,
+  BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle,
+  Columns3, LayoutGrid, Download, Zap, Loader2, CheckCircle2, ExternalLink, Phone, Copy, Check, Radar, Send,
 } from 'lucide-react';
 import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
 import { useAuthStore } from '@/stores/auth';
@@ -111,7 +111,10 @@ const Leads: React.FC = () => {
     score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
     filter: globalFilter || undefined, experience: experienceFilter || undefined,
     location_type: workplaceFilter || undefined,
-    has_salary: salaryFilter === 'any' ? true : salaryFilter ? Number(salaryFilter) * 100000 : undefined,
+    // "₹5L+" means a numeric floor (salary_min), not the has_salary flag -- the old
+    // code sent the rupee amount AS has_salary, so every pay band behaved like "disclosed".
+    salary_min: salaryFilter && salaryFilter !== 'any' ? Number(salaryFilter) * 100000 : undefined,
+    has_salary: salaryFilter === 'any' ? true : undefined,
   };
 
   const { data, isLoading, refetch, isFetching, isError, error } = useQuery(
@@ -121,7 +124,8 @@ const Leads: React.FC = () => {
       score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
       filter: globalFilter || undefined, experience: experienceFilter || undefined,
       location_type: workplaceFilter || undefined,
-      has_salary: salaryFilter === 'any' ? true : salaryFilter ? Number(salaryFilter) * 100000 : undefined,
+      salary_min: salaryFilter && salaryFilter !== 'any' ? Number(salaryFilter) * 100000 : undefined,
+      has_salary: salaryFilter === 'any' ? true : undefined,
     }),
     { staleTime: 15000, refetchInterval: 20000, onError: () => {} },
   );
@@ -142,8 +146,6 @@ const Leads: React.FC = () => {
   const runAction = (fn: Promise<unknown>, successMsg: string) =>
     fn.then(() => { toast({ title: successMsg, variant: 'success' }); queryClient.invalidateQueries('leads'); })
       .catch((err: Error) => toast({ title: 'Action failed', description: err.message, variant: 'error' }));
-
-  const enrich = (id: string, provider: string) => runAction(leadsApi.enrich(id, provider), provider === 'auto' ? 'Full-army enrichment started' : `${provider} enrichment started`);
 
   // Which action is in flight for which row, so the pressed button can show a spinner
   // instead of looking dead for the few hundred ms until the list refetches.
@@ -324,47 +326,47 @@ const Leads: React.FC = () => {
       ) : <span className="text-[12px] text-muted-foreground">—</span>;
     } }),
     columnHelper.accessor('created_at', { header: 'Discovered', cell: (info) => <span className="text-[13px] text-muted-foreground">{formatDate(info.getValue())}</span> }),
-    // Three-dot menus hid every action behind a click, so nothing was discoverable and
-    // "Enrich via..." was a dead item that did nothing. These are labelled badges now:
-    // each shows its own spinner while running, and the menu is kept only for the
-    // provider picker and rarely-used toggles.
+    // One Eye button (open) + one master Actions button (everything else). No chips, no
+    // three-dots: every row action lives inside the single grouped menu.
     columnHelper.display({ id: 'actions', header: () => <span className="sr-only">Actions</span>, cell: ({ row }) => {
       const lead = row.original;
       const pending = busy[lead.id];
       // Once a message is out, re-running enrich/verify/draft on the row is noise.
       const done = (['contacted', 'replied', 'converted'] as string[]).includes(lead.pipeline_stage);
+      const emailOk = lead.email_status === 'valid';
+      const waOk = lead.whatsapp_status === 'registered';
       return (
-        <div className="flex items-center justify-end gap-1">
-          {done ? (
+        <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+          {done && (
             <span className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
               <CheckCircle2 className="h-3 w-3" />{lead.pipeline_stage === 'replied' ? 'Replied' : 'Contacted'}
             </span>
-          ) : (
-            <>
-              <ActionChip
-                icon={Sparkles} label="Enrich" tone="primary"
-                busy={pending === 'enrich'} disabled={!!pending}
-                title="Run the free OSINT army to find an HR contact"
-                onClick={() => act(lead.id, 'enrich', leadsApi.enrich(lead.id, 'auto'), 'Enrichment started')}
-              />
-              <ActionChip
-                icon={BadgeCheck} label="Verify" tone="info"
-                busy={pending === 'verify'} disabled={!!pending}
-                title="Check the contact's email and WhatsApp"
-                onClick={() => act(lead.id, 'verify', leadsApi.verify(lead.id), 'Verification started')}
-              />
-              <ActionChip
-                icon={FileText} label="Draft" tone="success"
-                busy={pending === 'draft'} disabled={!!pending}
-                title="Write the outreach email and WhatsApp message"
-                onClick={() => act(lead.id, 'draft', leadsApi.draft(lead.id, 'both'), 'Draft started')}
-              />
-            </>
           )}
-          <Menu ariaLabel="More row actions" align="end" trigger={<span className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" role="button" tabIndex={0}><MoreVertical className="h-4 w-4" /></span>} items={[
+          <button
+            type="button"
+            title="Open full record"
+            aria-label={`Open ${lead.company_name || 'lead'}`}
+            onClick={() => navigate(`/leads/${lead.id}`)}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-border text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/[0.08] hover:text-[#8b7bf7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Eye className="h-3.5 w-3.5" />
+          </button>
+          <Menu ariaLabel={`Actions for ${lead.company_name || 'lead'}`} align="end" trigger={
+            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-primary/30 bg-primary/[0.08] px-3 py-1 text-[12px] font-semibold text-[#8b7bf7] transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-[#8b7bf7]" role="button" tabIndex={0}>
+              {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+              {pending ? 'Working…' : 'Actions'}
+              <ChevronDown className="h-3 w-3 opacity-60" />
+            </span>
+          } items={[
             { label: 'Open full record', icon: <Eye />, onSelect: () => navigate(`/leads/${lead.id}`) },
-            ...ENRICH_PROVIDERS.map((pc) => ({ label: `Enrich · ${pc.label}`, hint: pc.hint, icon: <Zap />, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, pc.key), `${pc.label} enrichment started`) })),
-            { label: lead.do_not_contact ? 'Allow contact again' : 'Mark Do-Not-Contact', icon: <XCircle />, danger: !lead.do_not_contact, onSelect: () => act(lead.id, 'dnc', leadsApi.setDoNotContact(lead.id, !lead.do_not_contact), lead.do_not_contact ? 'Contact allowed' : 'Marked do-not-contact') },
+            { label: 'Enrich · Full Army', section: 'Enrich', hint: 'free', icon: <Radar />, disabled: done, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, 'auto'), 'Full-army enrichment started') },
+            ...ENRICH_PROVIDERS.filter((p) => p.key !== 'auto').map((pc) => ({ label: `Enrich · ${pc.label}`, section: 'Enrich', hint: pc.hint, icon: <Sparkles />, disabled: done, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, pc.key), `${pc.label} enrichment started`) })),
+            { label: 'Verify contact', section: 'Outreach', icon: <BadgeCheck />, disabled: done, onSelect: () => act(lead.id, 'verify', leadsApi.verify(lead.id), 'Verification started') },
+            { label: 'Draft outreach', section: 'Outreach', icon: <FileText />, disabled: done, onSelect: () => act(lead.id, 'draft', leadsApi.draft(lead.id, 'both'), 'Draft started') },
+            { label: 'Verify & send', section: 'Outreach', icon: <Send />, hint: !emailOk && !waOk ? 'verify first' : undefined, disabled: done || (!emailOk && !waOk), onSelect: () => act(lead.id, 'send', leadsApi.verifyAndSend(lead.id, 'both'), 'Verify & send queued') },
+            { label: 'Send message', section: 'Outreach', icon: <Mail />, hint: !emailOk && !waOk ? 'verify first' : undefined, disabled: done || (!emailOk && !waOk), onSelect: () => act(lead.id, 'send', leadsApi.send(lead.id, 'both'), 'Send queued') },
+            ...((lead as any).hr_email ? [{ label: 'Copy HR email', section: 'Manage', icon: <Copy />, onSelect: () => { navigator.clipboard?.writeText((lead as any).hr_email); toast({ title: 'Email copied', variant: 'success' }); } }] : []),
+            { label: lead.do_not_contact ? 'Allow contact again' : 'Mark Do-Not-Contact', section: 'Manage', icon: <XCircle />, danger: !lead.do_not_contact, onSelect: () => act(lead.id, 'dnc', leadsApi.setDoNotContact(lead.id, !lead.do_not_contact), lead.do_not_contact ? 'Contact allowed' : 'Marked do-not-contact') },
           ]} />
         </div>
       );
@@ -494,13 +496,12 @@ const Leads: React.FC = () => {
                                 <DetailBlock title="Contact"><KV k="HR" v={lead.hr_name || '—'} /><KV k="Email" v={lead.hr_email} copyable mailto /><KV k="Phone" v={lead.hr_mobile} copyable /><KV k="LinkedIn" v={lead.hr_linkedin_url} link /></DetailBlock>
                                 <DetailBlock title="Company & Job"><KV k="Company" v={lead.company_name} /><KV k="Domain" v={lead.company_domain} link /><KV k="Job" v={lead.job_title} /><KV k="Source" v={lead.source_site} /><KV k="Location" v={[lead.city, lead.state, lead.country].filter(Boolean).join(', ') || lead.location} /><KV k="Workplace" v={lead.location_type || (lead.is_work_from_home ? 'remote' : null)} /><KV k="Employment" v={lead.employment_type} /><KV k="Experience" v={lead.experience_level} /><KV k="Department" v={lead.department} /><KV k="Openings" v={lead.openings_count != null ? String(lead.openings_count) : undefined} /><KV k="Salary" v={lead.salary_range} /><KV k="Posted" v={lead.posted_at ? formatDate(lead.posted_at) : undefined} /><KV k="Apply URL" v={lead.apply_url || lead.job_url} link copyable /></DetailBlock>
                                 <DetailBlock title="Pipeline">
-                                  <div className="mb-2 text-[11px] text-muted-foreground">Manual enrichment</div>
-                                  <div className="flex flex-wrap gap-1.5">{ENRICH_PROVIDERS.map((p) => <Button key={p.key} size="sm" variant="secondary" onClick={() => enrich(lead.id, p.key)}><p.icon className="h-3.5 w-3.5" />{p.label.replace(' (auto)', '')}</Button>)}</div>
-                                  <div className="mt-3 flex flex-wrap gap-1.5">
-                                    <Button size="sm" variant="soft" onClick={() => runAction(leadsApi.verify(lead.id), 'Verifying')}><BadgeCheck className="h-3.5 w-3.5" />Verify</Button>
-                                    <Button size="sm" variant="soft" onClick={() => runAction(leadsApi.draft(lead.id, 'both'), 'Drafting')}><FileText className="h-3.5 w-3.5" />Draft</Button>
-                                    <Button size="sm" variant="outline" onClick={() => navigate(`/leads/${lead.id}`)}><Eye className="h-3.5 w-3.5" />Open</Button>
-                                  </div>
+                                  <KV k="Stage" v={lead.pipeline_stage?.replace(/_/g, ' ')} />
+                                  <KV k="Email" v={lead.email_status} />
+                                  <KV k="WhatsApp" v={lead.whatsapp_status} />
+                                  <KV k="Owner" v={lead.assigned_to_email || lead.assigned_to} />
+                                  <KV k="No-contact" v={lead.do_not_contact ? 'yes' : undefined} />
+                                  <p className="pt-1 text-[11px] text-muted-foreground">Everything else lives under the row's Actions button.</p>
                                 </DetailBlock>
                               </div>
                             </motion.div>
@@ -524,35 +525,6 @@ const Leads: React.FC = () => {
 
 function DetailBlock({ title, children }: { title: string; children: React.ReactNode }) {
   return <div><p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</p><div className="space-y-1">{children}</div></div>;
-}
-/** Inline row action: icon + word, its own spinner while pending. A bare icon
-    button hid what each action did; a full-size Button made the row 40px tall. */
-const CHIP_TONES: Record<string, string> = {
-  // #8B7BF7 rather than the brand violet: at 11px the theme colour measured 4.49:1
-  // against this background, a hair under WCAG AA's 4.5 for small text.
-  primary: 'border-primary/30 bg-primary/[0.09] text-[#8b7bf7] hover:bg-primary/15 dark:text-[#8b7bf7]',
-  info: 'border-info/25 bg-info/[0.07] text-info hover:bg-info/15',
-  success: 'border-success/25 bg-success/[0.07] text-success hover:bg-success/15',
-};
-
-function ActionChip({ icon: Icon, label, tone, busy, disabled, title, onClick }: {
-  icon: React.ComponentType<{ className?: string }>; label: string;
-  tone: keyof typeof CHIP_TONES | string; busy?: boolean; disabled?: boolean;
-  title: string; onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={`${label}: ${title}`}
-      disabled={disabled}
-      onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-[3px] text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${CHIP_TONES[tone] || CHIP_TONES.primary}`}
-    >
-      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
-      <span className="hidden xl:inline">{busy ? '…' : label}</span>
-    </button>
-  );
 }
 
 function KV({ k, v, link, mailto, copyable }: { k: string; v?: string | null; link?: boolean; mailto?: boolean; copyable?: boolean }) {

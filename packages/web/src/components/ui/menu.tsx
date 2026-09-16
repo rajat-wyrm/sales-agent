@@ -15,6 +15,8 @@ export interface MenuItem {
   checked?: boolean
   danger?: boolean
   hint?: string
+  /** Renders a small group header above this item (e.g. "Enrich", "Outreach"). */
+  section?: string
 }
 
 interface MenuProps {
@@ -85,8 +87,13 @@ export function Menu({ trigger, items, align = "start", triggerClassName, panelC
           className={cn("z-dropdown min-w-[190px] max-w-[calc(100vw-16px)] overflow-hidden rounded-xl border border-border bg-surface/95 p-1 shadow-card backdrop-blur-xl animate-scale-in", panelClassName)}
         >
           {items.map((it, i) => (
-            <button
-              key={i}
+            <React.Fragment key={i}>
+              {it.section && (i === 0 || items[i - 1].section !== it.section) && (
+                <p className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {it.section}
+                </p>
+              )}
+              <button
               role="menuitem"
               disabled={it.disabled}
               onClick={(e) => { e.stopPropagation(); setOpen(false); if (!it.disabled) it.onSelect(); }}
@@ -99,7 +106,8 @@ export function Menu({ trigger, items, align = "start", triggerClassName, panelC
               <span className="flex-1 truncate">{it.label}</span>
               {it.hint && <span className="shrink-0 text-[11px] text-muted-foreground">{it.hint}</span>}
               {it.checked && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
-            </button>
+              </button>
+            </React.Fragment>
           ))}
         </div>,
         document.body,

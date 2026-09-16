@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "test": "jest --config test/jest.config.cjs",
     "migrate": "node --import tsx node_modules/node-pg-migrate/bin/node-pg-migrate.js -f database/config/migrate-config.cjs -m database/migrations --ignore-pattern \"README.md\" up",
-    "seed:admin": "tsx src/scripts/seedAdmin.ts"
+    "seed:admin": "tsx src/scripts/seedAdmin.ts",
+    "seed:admin:dist": "node dist/src/scripts/seedAdmin.js"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",

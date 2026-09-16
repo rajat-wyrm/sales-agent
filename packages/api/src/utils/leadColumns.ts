@@ -200,6 +200,9 @@ export function parseDelimited(text: string): string[][] {
 
 /** Header aliases: our own export headers plus the spellings third-party CRMs use. */
 const HEADER_ALIASES: Record<string, string[]> = {
+  // The export writes 'Lead ID': recognising it back lets a re-imported export merge
+  // onto the exact lead row instead of relying on fuzzy identity (strict no-dup).
+  lead_id: ['lead_id', 'lead id', 'id'],
   company_name: ['company_name', 'company', 'organization', 'employer', 'account name', 'company name', 'client'],
   company_domain: ['company_domain', 'domain', 'company domain', 'website domain'],
   website_url: ['website_url', 'website', 'company website', 'url'],
@@ -238,11 +241,31 @@ const HEADER_ALIASES: Record<string, string[]> = {
   notes: ['notes', 'note', 'comments', 'remark', 'remarks'],
 };
 
+/**
+ * True when a value is just another field's canonical key spelled differently
+ * ("company_name" under Company, "hr_email" under E-mail). Our slug folding makes
+ * `field === value` match, so header-echo detection needs this separately: without it a
+ * mis-parsed file creates a company literally named "company_name".
+ */
+export function isHeaderEcho(rec: Record<string, string>): boolean {
+  const filled = Object.entries(rec).filter(([, v]) => (v ?? '').trim() !== '');
+  if (filled.length === 0) return false;
+  // Compare in the same slugged space as the headers, i.e. against the canonical field's
+  // own name spelled like a header ("company_name" -> "company name"). Slugifying the key
+  // instead would never match, because slugHeader turns underscores into spaces.
+  const echoedHeaders = new Set<string>();
+  for (const [field, aliases] of Object.entries(HEADER_ALIASES)) echoedHeaders.add(slugHeader(field));
+  const echoCount = filled.filter(([, v]) => echoedHeaders.has(slugHeader(v))).length;
+  // One coincidence is possible ("role" as a job title); most of the row being a key is not.
+  return echoCount >= 2 && echoCount === filled.length;
+}
+
 /** canonical field -> where the imported value is written. */
 export type ImportField =
   | 'company' | 'job' | 'contact' | 'lead';
 
 export const FIELD_TARGET: Record<string, ImportField> = {
+  lead_id: 'lead',
   company_name: 'company', company_domain: 'company', website_url: 'company',
   industry: 'company', size_estimate: 'company', default_email: 'company',
   default_phone: 'company', about_company: 'company',
@@ -259,7 +282,7 @@ export const FIELD_TARGET: Record<string, ImportField> = {
 };
 
 /** Fields a row must have at least one of to be worth importing. */
-export const IMPORT_MINIMUM_FIELDS = ['company_name', 'job_title', 'job_url', 'hr_name', 'hr_email'];
+export const IMPORT_MINIMUM_FIELDS = ['lead_id', 'company_name', 'job_title', 'job_url', 'hr_name', 'hr_email'];
 
 export const slugHeader = (h: string) =>
   h.toLowerCase().replace(/^\ufeff/, '').replace(/[\s_\-]+/g, ' ').replace(/[.:]+$/g, '').trim();
@@ -340,3 +363,51 @@ export function generateFingerprint(companyName: string, jobTitle: string, jobUr
   const input = `${normalizedCompany}|${normalizedTitle}|${urlHostname(jobUrl)}`;
   return crypto.createHash('sha256').update(input).digest('hex');
 }
+
+// ---------------------------------------------------------------------------
+// Strict-dedup normalizers: the same real-world entity arrives spelled many ways
+// ("Acme Pvt. Ltd." vs "acme", ".../jobs/1/" vs ".../jobs/1?utm=x"). Every lookup in
+// the import ladder compares these canonical forms, so variants merge instead of
+// duplicating. Fingerprint above is untouched (scraper parity).
+// ---------------------------------------------------------------------------
+
+/** Corporate suffixes stripped for identity comparison (not display). */
+export const CORPORATE_SUFFIXES = [
+  ' private limited', ' pvt ltd', ' pvt. ltd.', ' pvt', ' ltd', ' limited',
+  ' llp', ' inc', ' corp', ' corporation', ' group', ' india',
+];
+
+/** Canonical company identity: lowercase, suffixes off, punctuation/spacing gone. */
+export function normalizeCompanyKey(name: string | null | undefined): string {
+  let s = (name || '').toLowerCase();
+  for (const suffix of CORPORATE_SUFFIXES) s = s.split(suffix).join('');
+  return s.replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Canonical job URL: trimmed, lowercased, query/fragment dropped, trailing slashes off.
+ * Lowercasing the path is safe here (identity comparison only, never fetched).
+ */
+export function normalizeJobUrl(url: string | null | undefined): string {
+  let s = (url || '').trim();
+  if (!s) return '';
+  s = s.split('#')[0].split('?')[0].trim().toLowerCase();
+  s = s.replace(/\/+$/, '');
+  return s;
+}
+
+/** Canonical LinkedIn URL for contact matching (vanity names are case-insensitive). */
+export function normalizeLinkedin(url: string | null | undefined): string {
+  let s = (url || '').trim();
+  if (!s) return '';
+  s = s.split('#')[0].split('?')[0].trim().toLowerCase().replace(/\/+$/, '');
+  return s;
+}
+
+/** SQL expression for the canonical job URL of a stored posting (mirrors normalizeJobUrl). */
+export const NORMALIZED_JOB_URL_SQL =
+  `lower(regexp_replace(regexp_replace(jp.job_url, '[?#].*$', ''), '/+$', '', 'g'))`;
+
+/** SQL expression for the canonical company key of a stored company (mirrors alnum fold). */
+export const NORMALIZED_COMPANY_SQL =
+  `regexp_replace(lower(name), '[^a-z0-9]', '', 'g')`;

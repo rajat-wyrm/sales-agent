@@ -14,7 +14,8 @@ let seq = 0;
 
 function fakeSql(handler: Handler) {
   const calls: Array<{ sql: string; params: any[] }> = [];
-  const unsafe = jest.fn(async (q: string, params: any[] = []) => {
+  let begins = 0;
+  const run = async (q: string, params: any[] = []) => {
     calls.push({ sql: q, params });
     const out = handler(q, params);
     // pg returns a row for every successful INSERT ... RETURNING; a fake that always
@@ -25,8 +26,14 @@ function fakeSql(handler: Handler) {
       return [{ id: `gen-${++seq}` }];
     }
     return out;
-  });
-  return { sql: { unsafe } as any, calls };
+  };
+  const client: any = {
+    unsafe: (q: string, params: any[] = []) => run(q, params),
+    // postgres.js runs the callback inside a transaction on a dedicated connection;
+    // for these tests the same recorder is enough.
+    begin: async (fn: (tx: any) => Promise<any>) => { begins++; return fn(client); },
+  };
+  return { sql: client, calls, begins: () => begins };
 }
 
 /** Handler that answers nothing (every dedup lookup misses, inserts succeed). */
@@ -139,8 +146,11 @@ describe('CSV import dedup', () => {
   test('fuzzy near-duplicate is inserted but flagged for the Duplicates page', async () => {
     const csv = `${HEADER}\nAcme Industries Pvt Ltd,Senior Backend Engineer,https://acme.com/jobs/be-2,,,,,`;
     const { sql, calls } = fakeSql((q) => {
-      if (q.includes("WHERE l.created_at > NOW() - INTERVAL '30 days'")) {
-        return [{ id: 'lead-old', company_name: 'Acme Industries', job_title: 'Senior Backend Engineer', job_url: 'https://acme.com/jobs/be-1' }];
+      // The probe runs in Postgres (exact normalized employer + trigram title similarity).
+      if (/similarity\(lower\(regexp_replace\(coalesce\(jp.title/.test(q)) {
+        expect(q).toContain('$1');
+        expect(q).not.toMatch(/Acme Industries|senior backend/i);   // values are bound, not interpolated
+        return [{ id: 'lead-old' }];
       }
       return [];
     });
@@ -207,11 +217,69 @@ describe('CSV import dedup', () => {
     expect(insLead.params).toContain(false);
   });
 
-  test('dry run writes nothing', async () => {
+  test('an oversized file is refused before any query', async () => {
+    const { sql } = fakeSql(nothing);
+    const { importCsvText } = require('../src/utils/importLeads');
+    const big = `${HEADER}\n${'A,'.repeat(8)}pad${'x'.repeat(7_000_000)}`;
+    await expect(importCsvText(sql, big, user))
+      .rejects.toThrow(/too large/i);
+  });
+
+  test('every written row runs inside its own transaction', async () => {
+    const { sql, calls, begins } = fakeSql(nothing);
+    await importLeadRecords(sql, rowsFrom(`${HEADER}\nA1,T1,https://a1.com/1,,,,,\nA2,T2,https://a2.com/2,,,,,`), user);
+    expect(calls.filter((c) => /INSERT INTO job_postings/i.test(c.sql))).toHaveLength(2);
+    // Two data rows -> two transactions, so one bad row cannot abort the other.
+    expect(begins()).toBe(2);
+  });
+
+  test('a bare national number is stored as E.164 so suppression/outreach can match it', async () => {
+    const { sql, calls } = fakeSql(nothing);
+    await importLeadRecords(sql, rowsFrom(`${HEADER}\nAcme,Mob,https://acme.com/m1,,,,,98765 43210,`), user);
+    const insContact = calls.find((c) => /INSERT INTO hr_contacts/i.test(c.sql))!;
+    expect(insContact.params.some((p: unknown) => p === '+919876543210')).toBe(true);
+  });
+
+  test('a row that is just column names creates no company called "company_name"', async () => {
+    const { sql, calls } = fakeSql(nothing);
+    // Our own slug folding makes 'company_name' === header 'Company Name', so this needs a
+    // separate check than the exact-echo guard.
+    const res = await importLeadRecords(
+      sql, [{ company_name: 'company_name', job_title: 'job_title', hr_email: 'hr_email' }], user,
+    );
+    expect(res.created).toBe(0);
+    expect(res.errors[0].reason).toMatch(/column names/i);
+    expect(calls.some((c) => /^\s*INSERT INTO companies/i.test(c.sql))).toBe(false);
+  });
+
+  test('the second row of one file merges inside a transaction and inherits suppression', async () => {
+    // Regression: the in-file branch ran before the suppressed flag was computed, so an
+    // opted-out contact repeated on row 2 could be written unflagged.
+    const { sql, calls } = fakeSql((q) => (
+      /FROM suppressions/.test(q) ? [{ normalized_contact: 'dupe@acme.com' }]
+        // lookups now come from the batched prefetch, not the per-row probe
+        : /WHERE jp.fingerprint = ANY\(\$1::text\[\]\)/.test(q) ? [{ fingerprint: require('../src/utils/leadColumns').generateFingerprint('Acme', 'Be', 'https://acme.com/1'), job_posting_id: 'jp-1', lead_id: 'lead-1' }]
+        : /WHERE jp.fingerprint = \$1 LIMIT 1/.test(q) ? [{ job_posting_id: 'jp-1', lead_id: 'lead-1' }]
+        : /SELECT hr_contact_id FROM job_postings/.test(q) ? [{ hr_contact_id: null }]
+        : []
+    ));
+    const rec = { company_name: 'Acme', job_title: 'Be', job_url: 'https://acme.com/1', hr_email: 'dupe@acme.com' };
+    const res = await importLeadRecords(sql, [rec, { ...rec }], user);
+    expect(res.created).toBe(0);
+    expect(res.merged).toBe(2);
+    const merged = calls.filter((c) => /UPDATE leads SET/.test(c.sql));
+    expect(merged.length).toBeGreaterThan(0);
+    // opt-out preserved on every merge path, including the in-file duplicate branch
+    for (const m of merged) expect(m.params).toContain(true);
+  });
+
+
+  test('dry run performs no writes', async () => {
     const { sql, calls } = fakeSql(nothing);
     const res = await importLeadRecords(sql, rowsFrom(`${HEADER}\nAcme,Be,https://acme.com/1,,,,,`), user, { dryRun: true });
     expect(res.created).toBe(1);
-    expect(calls).toHaveLength(0);
+    // reads (the fingerprint/fuzzy probes) are fine; nothing may mutate.
+    expect(calls.filter((c) => /^\s*(INSERT|UPDATE|DELETE)/i.test(c.sql))).toHaveLength(0);
   });
 
   test('oversized files are refused before any query', async () => {
@@ -233,5 +301,87 @@ describe('CSV import dedup', () => {
   test('a file with only a header is rejected clearly', async () => {
     const { sql } = fakeSql(nothing);
     await expect(importCsvText(sql, 'Company,Job Title\n', user)).rejects.toThrow(/header row/);
+  });
+});
+
+describe('strict dedup: same data must merge, never duplicate', () => {
+  const {
+    normalizeJobUrl, normalizeCompanyKey, normalizeLinkedin,
+  } = require('../src/utils/leadColumns');
+
+  test('normalizers canonicalise real-world variants', () => {
+    expect(normalizeJobUrl('https://jobs.acme.com/1/')).toBe('https://jobs.acme.com/1');
+    expect(normalizeJobUrl('https://jobs.acme.com/1?utm_source=x#frag')).toBe('https://jobs.acme.com/1');
+    expect(normalizeJobUrl('HTTPS://Jobs.Acme.COM/1/')).toBe('https://jobs.acme.com/1');
+    expect(normalizeCompanyKey('Acme Pvt. Ltd.')).toBe(normalizeCompanyKey('acme'));
+    expect(normalizeCompanyKey('Nexa IT Labs Private Limited')).toBe('nexaitlabs');
+    expect(normalizeLinkedin('https://www.linkedin.com/in/ravi-kumar/')).toBe('https://www.linkedin.com/in/ravi-kumar');
+    expect(normalizeLinkedin('https://www.linkedin.com/in/Ravi-Kumar?lipi=x')).toBe('https://www.linkedin.com/in/ravi-kumar');
+  });
+
+  test('Lead ID column merges onto the exact lead with zero inserts', async () => {
+    const csv = `Lead ID,Company,Job Title\n22222222-2222-2222-2222-222222222222,Acme,Backend Engineer`;
+    const { sql, calls } = fakeSql((q) => {
+      if (q.includes('FROM leads l JOIN job_postings jp')) {
+        return [{ job_posting_id: 'jp-9', lead_id: '22222222-2222-2222-2222-222222222222' }];
+      }
+      if (q.includes('SELECT hr_contact_id FROM job_postings')) return [{ hr_contact_id: 'hc-9' }];
+      return [];
+    });
+
+    const res = await importLeadRecords(sql, rowsFrom(csv), user);
+
+    expect(res).toMatchObject({ total_rows: 1, created: 0, merged: 1, skipped: 0 });
+    expect(calls.some((c) => /INSERT INTO (leads|job_postings|companies)/i.test(c.sql))).toBe(false);
+  });
+
+  test('trailing-slash / utm URL variant merges instead of duplicating', async () => {
+    const csv = `${HEADER}\nAcme,Backend Engineer,https://jobs.acme.com/1/?utm_source=agency,,,,,`;
+    const { sql } = fakeSql((q, params) => {
+      // exact fingerprint misses (different raw URL host? no — same host; force miss to
+      // exercise the URL rung specifically)
+      if (q.includes('jp.fingerprint = $1')) return [];
+      if (q.includes('regexp_replace(jp.job_url')) {
+        // the probe must arrive canonicalised, or variants never meet
+        expect(params[0]).toContain('https://jobs.acme.com/1');
+        return [{ job_posting_id: 'jp-1', lead_id: 'lead-1' }];
+      }
+      if (q.includes('SELECT hr_contact_id FROM job_postings')) return [{ hr_contact_id: 'hc-1' }];
+      return [];
+    });
+
+    const res = await importLeadRecords(sql, rowsFrom(csv), user);
+    expect(res).toMatchObject({ created: 0, merged: 1 });
+  });
+
+  test('"Acme Pvt Ltd" merges into stored "Acme" (normalized company lookup)', async () => {
+    const csv = `${HEADER}\nAcme Pvt Ltd,Data Analyst,https://other-board.com/da,Bengaluru,,Priya,priya@acme.com,,`;
+    const { sql, calls } = fakeSql((q, params) => {
+      if (q.includes('jp.fingerprint = $1')) return [];
+      if (q.includes('regexp_replace(jp.job_url')) return [];
+      if (q.includes('similarity(')) return [];
+      if (q.includes('FROM companies')) {
+        expect(params.flat()).toContain('acme');
+        return [{ id: 'comp-1', name: 'Acme', domain: null }];
+      }
+      return [];
+    });
+
+    const res = await importLeadRecords(sql, rowsFrom(csv), user);
+    expect(res.created).toBe(1);
+    // reused the existing company: no second company row
+    expect(calls.some((c) => /INSERT INTO companies/i.test(c.sql))).toBe(false);
+  });
+
+  test('dry run reports merged (not created) for rows the commit would merge', async () => {
+    const { sql, calls } = fakeSql((q) => {
+      if (q.includes('FROM job_postings jp LEFT JOIN leads l')) {
+        return [{ job_posting_id: 'jp-1', lead_id: 'lead-1' }];
+      }
+      return [];
+    });
+    const res = await importLeadRecords(sql, rowsFrom(`${HEADER}\nAcme,Be,https://acme.com/1,,,,,`), user, { dryRun: true });
+    expect(res).toMatchObject({ created: 0, merged: 1 });
+    expect(calls.filter((c) => /^\s*(INSERT|UPDATE|DELETE)/i.test(c.sql))).toHaveLength(0);
   });
 });

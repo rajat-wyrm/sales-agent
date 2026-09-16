@@ -126,7 +126,13 @@ export const leads = {
   // CSV/TSV import. The file is parsed in the browser and posted as text; the server
   // maps headers and dedups, so nothing new has to be installed for multipart.
   importCsv: async (payload: { csv?: string; rows?: Array<Record<string, string>>; dry_run?: boolean }) => {
-    const res = await api.post('/leads/import', payload, { timeout: 180000 });
+    // A chunk of a few thousand rows is tens of MB through JSON; the client default would
+    // abort mid-upload. The server rejects an oversized body with 413 well before this.
+    const res = await api.post('/leads/import', payload, {
+      timeout: 300000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
     return res.data as ImportResult;
   },
   get: async (id: string) => {

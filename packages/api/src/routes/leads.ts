@@ -39,7 +39,19 @@ const paginationSchema = z.object({
   state: z.string().optional(),
   department: z.string().optional(),
   salary_min: z.coerce.number().min(0).optional(),
-  has_salary: z.coerce.boolean().optional(),
+  // Query strings arrive as text, and Boolean("false") is true -- so z.coerce.boolean()
+  // turned ?has_salary=false into true. Parse the words explicitly instead.
+  has_salary: z.preprocess(
+    (v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'boolean') return v;
+      const s = String(v).trim().toLowerCase();
+      if (['true', '1', 'yes'].includes(s)) return true;
+      if (['false', '0', 'no'].includes(s)) return false;
+      return v;
+    },
+    z.boolean().optional(),
+  ),
   filter: z.string().optional(),
 });
 
@@ -794,6 +806,17 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       const { id } = idResult.data;
       const sql = getDB();
 
+      // The timeline exposes enrichment providers, verification results, draft bodies and
+      // delivery status. GET /:id scopes that to the assigned rep; this route did not, so
+      // any rep could enumerate UUIDs and read another rep's outreach history.
+      const viewer = req.user as { id: string; role: string };
+      if (viewer.role !== 'admin') {
+        const owned = await sql.unsafe(`SELECT 1 FROM leads WHERE id = $1::uuid AND assigned_to = $2::uuid`, [id, viewer.id]);
+        if ((owned as unknown[]).length === 0) {
+          return reply.status(404).send({ error: 'Lead not found' });
+        }
+      }
+
       const enrichment = await sql.unsafe(
         `SELECT id, provider, status, credits_used, created_at FROM enrichment_log WHERE lead_id = $1 ORDER BY created_at DESC`,
         [id],
@@ -879,13 +902,27 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const { lead_ids, channel } = parseResult.data;
 
+      // Drafting is a write against someone's pipeline. Passing arbitrary UUIDs used to
+      // queue work on leads the caller cannot see or edit; filter to the ones they own.
+      const user = req.user as { id: string; role: string };
+      const sql = getDB();
+      const permitted = await sql.unsafe(
+        `SELECT id FROM leads WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid)`,
+        [lead_ids, user.role, user.id],
+      );
+      const allowed = new Set((permitted as unknown as Array<{ id: string }>).map((r) => r.id));
+      const rejected = lead_ids.filter((id) => !allowed.has(id));
+      if (allowed.size === 0) {
+        return reply.status(403).send({ error: 'None of these leads are yours to draft' });
+      }
+
       const redis = getRedis();
       const jobId = await redis.lpush(
         'bulk_draft_queue:requests',
         JSON.stringify({
-          lead_ids,
+          lead_ids: [...allowed],
           channel,
-          requested_by: (req.user as { id: string }).id,
+          requested_by: user.id,
           requested_at: new Date().toISOString(),
         }),
       );
@@ -893,7 +930,8 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(202).send({
         message: 'Bulk draft job queued',
         job_id: String(jobId),
-        lead_ids,
+        lead_ids: [...allowed],
+        rejected_lead_ids: rejected,
         channel,
       });
     },
@@ -1005,9 +1043,18 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
     '/import',
     {
       preValidation: [authorize(['admin', 'sales_rep'])],
-      // A 5k-row paste is one request; the global 100/min would throttle nothing else
-      // but an import is heavy enough to want its own ceiling.
-      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+      // Per-user, generous-but-bounded: an import is a deliberate admin/rep action and a
+      // real sheet now arrives as several chunks, so the previous 10/min made legitimate
+      // multi-thousand-row files fail mid-way with 429. Still far below the global 100/min
+      // for anonymous traffic, and keyed on the user id rather than IP so an office behind
+      // one NAT does not share a bucket.
+      config: {
+        rateLimit: {
+          max: Number(process.env.LEADS_IMPORT_MAX_PER_MIN ?? 60),
+          timeWindow: '1 minute',
+          keyGenerator: (req: any) => String(req.user?.id ?? req.ip),
+        },
+      },
     },
     async (req, reply) => {
       const parsed = importBodySchema.safeParse(req.body);
@@ -1156,9 +1203,22 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const sql = getDB();
+      const actor = req.user as { id: string; role: string };
 
-      const target = await sql.unsafe(`SELECT id FROM leads WHERE id = $1`, [merge_into_id]);
-      if (!target || target.length === 0) {
+      // Merging DELETES the source lead and re-parents its history onto the target, so it
+      // is the most destructive lead operation here. Both rows must be the caller's
+      // (admin excepted): previously either could be any UUID, letting one rep destroy
+      // another's lead by guessing an id.
+      const visible = await sql.unsafe(
+        `SELECT id FROM leads
+          WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid)`,
+        [[id, merge_into_id], actor.role, actor.id] as any,
+      );
+      const allowed = new Set((visible as unknown as Array<{ id: string }>).map((r) => r.id));
+      if (!allowed.has(id)) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
+      if (!allowed.has(merge_into_id)) {
         return reply.status(404).send({ error: 'Target lead not found' });
       }
 
