@@ -100,6 +100,17 @@ export const auth = {
   },
 };
 
+export interface ImportResult {
+  total_rows: number;
+  created: number;
+  merged: number;
+  merged_fuzzy: number;
+  skipped: number;
+  columns_mapped: Record<string, string>;
+  columns_ignored: string[];
+  errors: Array<{ row: number; reason: string }>;
+}
+
 export const leads = {
   list: async (params?: Record<string, any>) => {
     const res = await api.get('/leads', { params });
@@ -107,9 +118,16 @@ export const leads = {
   },
   // Server-side export: every lead matching the filters, as a styled workbook.
   // responseType blob so axios does not try to parse the XML payload.
+  // format=csv returns the identical column set as plain CSV.
   exportExcel: async (params?: Record<string, any>) => {
     const res = await api.get('/leads/export', { params, responseType: 'blob' });
     return res.data as Blob;
+  },
+  // CSV/TSV import. The file is parsed in the browser and posted as text; the server
+  // maps headers and dedups, so nothing new has to be installed for multipart.
+  importCsv: async (payload: { csv?: string; rows?: Array<Record<string, string>>; dry_run?: boolean }) => {
+    const res = await api.post('/leads/import', payload, { timeout: 180000 });
+    return res.data as ImportResult;
   },
   get: async (id: string) => {
     const res = await api.get(`/leads/${id}`);

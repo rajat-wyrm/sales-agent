@@ -7,7 +7,7 @@ import {
 import { flexRender, SortingState, ColumnFiltersState, ColumnVisibilityState } from '@tanstack/react-table';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { leads as leadsApi, admin } from '@/lib/api';
+import { leads as leadsApi, admin, type ImportResult } from '@/lib/api';
 import { Lead } from '@/lib/types';
 import {
   Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles, MapPin,
@@ -28,6 +28,9 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { ErrorState } from '@/components/ui/error-state';
 import { Pagination } from '@/components/ui/pagination';
 import { SCORE_BAND_META, stageMeta, emailStatusMeta, whatsappStatusMeta, formatDate } from '@/lib/format';
+import { LEAD_COLUMNS, leadsToCsv } from '@/lib/leadColumns';
+import { ImportLeadsModal } from '@/components/ImportLeadsModal';
+import { Upload } from 'lucide-react';
 
 type Density = 'comfortable' | 'compact';
 
@@ -41,66 +44,8 @@ const ENRICH_PROVIDERS = [
   { key: 'apollo', label: 'Apollo.io', hint: 'key', icon: Sparkles },
 ] as const;
 
-// Every field a lead row carries, exported by name. Deliberately NOT derived from
-// table column ids: 'role'/'salary'/'posting_link' are display-only composites with no
-// matching property on the row object, so the previous export wrote empty strings for
-// them and omitted location_type, apply_url, salary bounds and more entirely.
-const EXPORT_COLUMNS: Array<[string, (r: any) => unknown]> = [
-  ['Score', (r) => r.lead_score],
-  ['Score Band', (r) => r.score_band],
-  ['Company', (r) => r.company_name],
-  ['Company Domain', (r) => r.company_domain],
-  ['Job Title', (r) => r.job_title],
-  ['Location', (r) => [r.city, r.state, r.country].filter(Boolean).join(', ') || r.location],
-  ['City', (r) => r.city],
-  ['State', (r) => r.state],
-  ['Country', (r) => r.country],
-  ['Location Type', (r) => r.location_type || (r.is_work_from_home ? 'remote' : '')],
-  ['Employment Type', (r) => r.employment_type],
-  ['Experience Level', (r) => r.experience_level],
-  ['Department', (r) => r.department],
-  ['Openings', (r) => r.openings_count],
-  ['Salary Range', (r) => r.salary_range],
-  ['Salary Min', (r) => r.salary_min],
-  ['Salary Max', (r) => r.salary_max],
-  ['Salary Currency', (r) => r.salary_currency],
-  ['Salary Period', (r) => r.salary_period],
-  ['HR Name', (r) => r.hr_name],
-  ['HR Email', (r) => r.hr_email],
-  ['HR Mobile', (r) => r.hr_mobile],
-  ['HR LinkedIn', (r) => r.hr_linkedin_url],
-  ['Email Status', (r) => r.email_status],
-  ['WhatsApp Status', (r) => r.whatsapp_status],
-  ['Pipeline Stage', (r) => r.pipeline_stage],
-  ['Data Quality', (r) => r.data_quality],
-  ['Source Site', (r) => r.source_site],
-  ['Job URL', (r) => r.job_url],
-  ['Apply URL', (r) => r.apply_url],
-  ['Posted At', (r) => r.posted_at],
-  ['Discovered At', (r) => r.created_at],
-  ['Updated At', (r) => r.updated_at],
-  ['Assigned To', (r) => r.assigned_to_email || r.assigned_to],
-  ['Data Quality', (r) => r.data_quality],
-  ['Do Not Contact', (r) => (r.do_not_contact ? 'YES' : 'no')],
-  ['Lead ID', (r) => r.id],
-];
-
-const csvCell = (v: unknown) => {
-  if (v === null || v === undefined) return '';
-  const s = String(v);
-  // Excel evaluates a leading = + @ as a formula; scraped text must not become one.
-  const safe = /^[=+@\t\r]/.test(s) ? `'${s}` : s;
-  return `"${safe.replace(/"/g, '""')}"`;
-};
-
-/** CSV of already-loaded rows, used for an explicit selection. */
-const leadsToCsv = (rows: any[]) => new Blob(
-  ['\ufeff' + [
-    EXPORT_COLUMNS.map(([h]) => `"${h}"`).join(','),
-    ...rows.map((r) => EXPORT_COLUMNS.map(([, get]) => csvCell(get(r))).join(',')),
-  ].join('\r\n')],
-  { type: 'text/csv;charset=utf-8;' },
-);
+// Export columns live in @/lib/leadColumns (mirror of the API registry), so the CSV a
+// rep downloads here and the server workbook can never disagree.
 
 const ALL_COLUMNS = [
   { id: 'lead_score', label: 'Score' }, { id: 'company_name', label: 'Company' },
@@ -230,32 +175,46 @@ const Leads: React.FC = () => {
   const toggleSelect = (id: string) => setSelectedIds((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleExpand = (id: string) => setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  // Excel export. The full dataset comes from the server (every lead matching the
-  // active filters, not just the 25 rows on screen); selected rows are exported
-  // client-side when a selection exists.
+  // Export. "Filtered" asks the server for every lead matching the current filters
+  // (not just the 25 on screen) and returns all LEAD_COLUMNS; "selected" writes the
+  // checked rows from this page using the same column registry.
   const [exporting, setExporting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const downloadBlob = (blob: Blob, name: string) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   };
-  const exportCsv = async () => {
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  const exportSelectedCsv = () => {
+    const rows = leadRows.filter((r: any) => selectedIds.has(r.id));
+    if (rows.length === 0) { toast({ title: 'Nothing selected', variant: 'error' }); return; }
+    downloadBlob(new Blob([leadsToCsv(rows)], { type: 'text/csv;charset=utf-8;' }), `hiregen-leads-selected-${rows.length}.csv`);
+    toast({ title: `Exported ${rows.length} selected leads`, variant: 'success' });
+  };
+
+  const runExport = async (kind: 'xls' | 'csv') => {
     setExporting(true);
     try {
-      if (selectedIds.size > 0) {
-        const rows = leadRows.filter((r: any) => selectedIds.has(r.id));
-        downloadBlob(leadsToCsv(rows), `hiregen-leads-selected-${rows.length}.csv`);
-        toast({ title: `Exported ${rows.length} selected leads`, variant: 'success' });
-        return;
-      }
-      const blob = await leadsApi.exportExcel(exportParams);
-      downloadBlob(blob, `hiregen-leads-${new Date().toISOString().slice(0, 10)}.xls`);
-      toast({ title: 'Workbook downloaded', description: 'All filtered leads, 36 columns', variant: 'success' });
+      const blob = await leadsApi.exportExcel({ ...exportParams, format: kind });
+      downloadBlob(blob, `hiregen-leads-${stamp()}.${kind}`);
+      toast({ title: `${kind.toUpperCase()} downloaded`, description: `All filtered leads · ${LEAD_COLUMNS.length} columns`, variant: 'success' });
     } catch (e: any) {
-      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: "error" });
+      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: 'error' });
     } finally {
       setExporting(false);
     }
+  };
+
+  const onImported = (r: ImportResult) => {
+    queryClient.invalidateQueries('leads');
+    const bits = [r.created && `${r.created} new`, (r.merged + r.merged_fuzzy) && `${r.merged + r.merged_fuzzy} merged`, r.skipped && `${r.skipped} skipped`].filter(Boolean);
+    toast({
+      title: `Imported ${r.total_rows} rows`,
+      description: bits.join(' · ') || 'nothing to write',
+      variant: r.skipped && !r.created ? 'warning' : 'success',
+    });
   };
 
   const columnHelper = createColumnHelper<Lead & Record<string, any>>();
@@ -450,7 +409,17 @@ const Leads: React.FC = () => {
         <div className="h-6 w-px bg-border" />
         <Menu align="start" ariaLabel="Columns" trigger={<Button variant="outline" size="sm"><Columns3 className="h-4 w-4" />Columns</Button>} items={ALL_COLUMNS.map((c) => ({ label: c.label, checked: visibility[c.id] !== false, onSelect: () => setVisibility((v) => ({ ...v, [c.id]: v[c.id] === false })) }))} />
         <Menu align="start" ariaLabel="Density" trigger={<Button variant="outline" size="sm" title={`Row density: ${density}`}><LayoutGrid className="h-4 w-4" />{density === 'compact' ? 'Compact' : 'Comfortable'}</Button>} items={[{ label: 'Comfortable', checked: density === 'comfortable', onSelect: () => setDensity('comfortable') }, { label: 'Compact', checked: density === 'compact', onSelect: () => setDensity('compact') }]} />
-        <Button variant="outline" size="sm" onClick={exportCsv}><Download className="h-4 w-4" />Export</Button>
+        <Menu
+          align="start"
+          ariaLabel="Export"
+          trigger={<Button variant="outline" size="sm" loading={exporting}><Download className="h-4 w-4" />Export</Button>}
+          items={[
+            { label: 'Excel workbook — all filtered', onSelect: () => runExport('xls'), hint: `${LEAD_COLUMNS.length} columns + summary sheet` },
+            { label: 'CSV — all filtered', onSelect: () => runExport('csv'), hint: 'same columns, plain text' },
+            { label: `CSV — ${selectedIds.size} selected`, onSelect: exportSelectedCsv, disabled: selectedIds.size === 0 },
+          ]}
+        />
+        <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" />Import</Button>
         <div className="ml-auto flex items-center gap-2">
           <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${queued > 0 ? 'border-success/40 bg-success/10 text-success' : 'border-border text-muted-foreground'}`}><Radar className={`h-3 w-3 ${queued > 0 ? 'animate-pulse' : ''}`} />{queued > 0 ? `${queued} processing` : 'idle'}</span>
           <Button variant="outline" size="sm" onClick={() => refetch()} loading={isFetching}><RefreshCw className="h-4 w-4" /></Button>
@@ -547,6 +516,8 @@ const Leads: React.FC = () => {
         </div>
         {leadData.pagination && <div className="border-t border-border"><Pagination pagination={leadData.pagination} onPageChange={(p: number) => setPagination({ ...pagination, pageIndex: p - 1 })} /></div>}
       </div>
+
+      <ImportLeadsModal open={importOpen} onClose={() => setImportOpen(false)} onDone={onImported} />
     </div>
   );
 };
