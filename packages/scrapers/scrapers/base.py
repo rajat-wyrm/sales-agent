@@ -336,7 +336,7 @@ class BaseScraper(abc.ABC):
 
         Checks robots.txt compliance before scraping (SRS §13).
         """
-        if self._circuit_breaker.is_open():
+        if await self._circuit_breaker.is_open_async():
             self._logger.warning(f"Circuit breaker open for {self.source_name}, skipping")
             return []
 
