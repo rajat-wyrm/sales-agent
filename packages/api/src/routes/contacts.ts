@@ -4,6 +4,8 @@ import { getDB } from '../utils/db';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
 import { logAuditEvent } from '../utils/audit';
+import { CONTACT_SELECT_SQL, CONTACT_FROM_SQL } from '../utils/contactColumns';
+import { buildContactsWorkbook, buildContactsCsv } from '../utils/contactWorkbook';
 
 const contactSchema = z.object({
   full_name: z.string().optional(),
@@ -191,4 +193,52 @@ export const contactsRoutes: FastifyPluginAsync = async (fastify) => {
 
     return { message: 'Contact deleted' };
   });
+
+  fastify.get(
+    '/export',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const parseResult = z.object({ search: z.string().optional() }).safeParse(req.query);
+      if (!parseResult.success) {
+        return reply.status(400).send({ error: 'Invalid query parameters' });
+      }
+      const { search } = parseResult.data;
+      const format = (req.query as Record<string, unknown>).format === 'csv' ? 'csv' : 'xls';
+      const user = req.user as { id: string; role: string; email?: string };
+      const sql = getDB();
+
+      const conditions: string[] = [];
+      const values: unknown[] = [];
+      let paramIdx = 1;
+
+      if (search) {
+        conditions.push(`(hc.full_name ILIKE $${paramIdx} OR c.name ILIKE $${paramIdx})`);
+        values.push(`%${search}%`);
+        paramIdx++;
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const EXPORT_MAX_ROWS = Number(process.env.CONTACTS_EXPORT_MAX_ROWS ?? 10000);
+      const rows = await sql.unsafe(
+        `SELECT ${CONTACT_SELECT_SQL} ${CONTACT_FROM_SQL} ${whereClause} ORDER BY hc.created_at DESC LIMIT ${EXPORT_MAX_ROWS + 1}`,
+        values as any[],
+      );
+
+      const truncated = (rows as unknown[]).length > EXPORT_MAX_ROWS;
+      if (truncated) rows.splice(EXPORT_MAX_ROWS);
+
+      const body = format === 'csv'
+        ? buildContactsCsv(rows as any[])
+        : buildContactsWorkbook(rows as any[], (user as any).email ?? '', truncated);
+
+      return reply
+        .header('Content-Type', format === 'csv' ? 'text/csv; charset=utf-8' : 'application/vnd.ms-excel')
+        .header(
+          'Content-Disposition',
+          `attachment; filename="hiregen-contacts-${new Date().toISOString().slice(0, 10)}.${format === 'csv' ? 'csv' : 'xls'}"`,
+        )
+        .send(body);
+    },
+  );
 };

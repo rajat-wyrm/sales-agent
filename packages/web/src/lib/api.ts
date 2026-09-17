@@ -253,6 +253,13 @@ export const contacts = {
     const res = await api.get('/contacts', { params });
     return res.data;
   },
+  // Server-side export: every contact matching the filters, as a styled workbook.
+  // responseType blob so axios does not try to parse the XML/JSON payload.
+  // format=csv returns the identical column set as plain CSV.
+  exportExcel: async (params?: Record<string, any>) => {
+    const res = await api.get('/contacts/export', { params, responseType: 'blob' });
+    return res.data as Blob;
+  },
   get: async (id: string) => {
     const res = await api.get(`/contacts/${id}`);
     return res.data;
