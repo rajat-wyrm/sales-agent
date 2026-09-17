@@ -24,8 +24,10 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { ErrorState } from '@/components/ui/error-state';
 import { Pagination } from '@/components/ui/pagination';
 import { useToast } from '@/components/ui/toast';
-import { Plus, Search, RefreshCw, ChevronUp, ChevronDown, Trash2, Users, Pencil, Link2, Mail, Phone } from 'lucide-react';
+import { Plus, Search, RefreshCw, ChevronUp, ChevronDown, Trash2, Users, Pencil, Link2, Mail, Phone, Download } from 'lucide-react';
 import { initials, formatDate } from '@/lib/format';
+import { CONTACT_COLUMNS } from '@/lib/contactColumns';
+import { Menu } from '@/components/ui/menu';
 
 const PAGE_SIZE = 10;
 
@@ -53,6 +55,7 @@ const Contacts: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [deleteTarget, setDeleteTarget] = useState<HRContact | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const isAdmin = user?.role === 'admin';
 
@@ -99,6 +102,31 @@ const Contacts: React.FC = () => {
     },
     onError: (err) => toast({ title: 'Failed to delete contact', description: (err as Error).message, variant: 'error' }),
   });
+
+  // Export — same pattern as Leads: server export of all filtered rows.
+  const exportParams = {
+    search: globalFilter || undefined,
+  };
+
+  const downloadBlob = (blob: Blob, name: string) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  const runExport = async (kind: 'xls' | 'csv') => {
+    setExporting(true);
+    try {
+      const blob = await contactsApi.exportExcel({ ...exportParams, format: kind });
+      downloadBlob(blob, `hiregen-contacts-${stamp()}.${kind}`);
+      toast({ title: `${kind.toUpperCase()} downloaded`, description: `All filtered contacts · ${CONTACT_COLUMNS.length} columns`, variant: 'success' });
+    } catch (e: any) {
+      toast({ title: 'Export failed', description: e?.message || 'Try again', variant: 'error' });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const contactData = (data as any) ?? { data: [], pagination: { page: 1, limit: 50, total: 0, pages: 0 } };
   const contacts: HRContact[] = contactData.data || [];
@@ -288,6 +316,15 @@ const Contacts: React.FC = () => {
               <RefreshCw className="h-4 w-4" />
               Refresh
             </Button>
+            <Menu
+              align="start"
+              ariaLabel="Export"
+              trigger={<Button variant="outline" size="sm" loading={exporting}><Download className="h-4 w-4" />Export</Button>}
+              items={[
+                { label: 'Excel workbook — all filtered', onSelect: () => runExport('xls'), hint: `${CONTACT_COLUMNS.length} columns + summary sheet` },
+                { label: 'CSV — all filtered', onSelect: () => runExport('csv'), hint: 'same columns, plain text' },
+              ]}
+            />
             <Button onClick={openCreate}>
               <Plus className="h-4 w-4" />
               Add Contact
