@@ -32,8 +32,6 @@ try:
 except Exception:
     _FREE_PROXY_CLIENT = None
 
-logger = logging.getLogger(__name__)
-
 _robot_checker: RobotsChecker | None = None
 
 
