@@ -31,7 +31,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Immutable-raw-snapshot versioning (Track 3): bump when normalize_lead's
 # output contract changes so reprocessing can tell stale snapshots apart.
-PARSER_VERSION = "4"
+PARSER_VERSION = 4
 
 
 def content_hash_of(raw_payload: Any) -> str:
@@ -1766,11 +1766,11 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
 
     for _ in range(max_items):
         try:
-            raw_msg = await redis_client.brpop("raw_leads_queue:requests", timeout=2)
-            if raw_msg is None:
+            got = await reliable_brpop(redis_client, "raw_leads_queue:requests", timeout=2)
+            if got is None:
                 break
 
-            raw_data = json.loads(raw_msg[1])
+            raw_msg, raw_data = got
             normalized = normalize_lead(raw_data)
 
             if not normalized["is_fresher"]:
@@ -1796,6 +1796,8 @@ async def process_batch(redis_client: redis.Redis, db_pool: asyncpg.Pool, max_it
                     await chain_lead(redis_client, "enrichment_queue:requests", lead_id, provider="auto", requested_by=normalized.get("requested_by", "system"))
                 else:
                     deduped += 1
+
+            await ack(redis_client, "raw_leads_queue:requests", raw_msg)  # ← ADD THIS LINE HERE
 
         except json.JSONDecodeError:
             errors += 1
