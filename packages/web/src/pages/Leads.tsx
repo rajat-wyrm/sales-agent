@@ -11,7 +11,7 @@ import { leads as leadsApi, admin, type ImportResult } from '@/lib/api';
 import { Lead } from '@/lib/types';
 import {
   Search, RefreshCw, ChevronUp, ChevronDown, ChevronRight, Play, Sparkles, MapPin,
-  BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, XCircle,
+  BadgeCheck, FileText, MessageCircle, Mail, Eye, Users, UserPlus, UserCheck, XCircle,
   Columns3, LayoutGrid, Download, Zap, Loader2, CheckCircle2, ExternalLink, Phone, Copy, Check, Radar, Send,
 } from 'lucide-react';
 import { useSSE, isLeadLifecycleEvent } from '@/hooks/useSSE';
@@ -63,7 +63,21 @@ const Leads: React.FC = () => {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  // Dashboard charts deep-link here (?pipeline_stage=, ?score_band=): seed the
+  // filters from the URL once so a click on a funnel bar lands filtered.
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const init: ColumnFiltersState = [];
+      const stage = params.get('pipeline_stage');
+      const band = params.get('score_band');
+      if (stage) init.push({ id: 'pipeline_stage', value: stage });
+      if (band) init.push({ id: 'score_band', value: band });
+      return init;
+    } catch {
+      return [];
+    }
+  });
   const [globalFilter, setGlobalFilter] = useState('');
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 25 });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -76,6 +90,51 @@ const Leads: React.FC = () => {
   const [visibility, setVisibility] = useState<ColumnVisibilityState>({});
   const [density, setDensity] = useState<Density>('comfortable');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [assignLead, setAssignLead] = useState<Lead | null>(null);
+  const [memberSearch, setMemberSearch] = useState('');
+  const isAdmin = useAuthStore.getState().user?.role === 'admin';
+  const { data: membersData } = useQuery('team-members', () => admin.teamMembers(), { retry: false, staleTime: 60000 });
+  const members: Array<{ id: string; email: string; role: string }> = (membersData as any)?.members || [];
+  const assignMutation = useMutation(
+    ({ id, userId }: { id: string; userId: string | null }) => leadsApi.assign(id, userId),
+    {
+      onSuccess: () => {
+        toast({ title: 'Lead assigned', variant: 'success' });
+        setAssignLead(null);
+        queryClient.invalidateQueries('leads');
+      },
+      onError: (e) => toast({ title: 'Assign failed', description: (e as Error).message, variant: 'error' }),
+    },
+  );
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const bulkClaimMutation = useMutation(
+    (ids: string[]) => leadsApi.bulkClaim(ids),
+    {
+      onSuccess: (r) => {
+        const skipped = r.already_claimed?.length || 0;
+        toast({
+          title: `Claimed ${r.claimed.length} lead${r.claimed.length === 1 ? '' : 's'}`,
+          description: skipped ? `${skipped} already owned by someone else` : undefined,
+          variant: skipped && r.claimed.length === 0 ? 'warning' : 'success',
+        });
+        setSelectedIds(new Set());
+        queryClient.invalidateQueries('leads');
+      },
+      onError: (e) => toast({ title: 'Bulk claim failed', description: (e as Error).message, variant: 'error' }),
+    },
+  );
+  const bulkAssignMutation = useMutation(
+    ({ ids, userId }: { ids: string[]; userId: string | null }) => leadsApi.bulkAssign(ids, userId),
+    {
+      onSuccess: (r) => {
+        toast({ title: `Assigned ${r.assigned.length} leads`, variant: 'success' });
+        setBulkAssignOpen(false);
+        setSelectedIds(new Set());
+        queryClient.invalidateQueries('leads');
+      },
+      onError: (e) => toast({ title: 'Bulk assign failed', description: (e as Error).message, variant: 'error' }),
+    },
+  );
 
   // Column ids and the API's sort enum are different namespaces: several columns are
   // display composites (salary_range renders text but the sortable value is a numeric
@@ -101,6 +160,7 @@ const Leads: React.FC = () => {
   const scoreBand = columnFilters.find((f) => f.id === 'score_band')?.value as string | undefined;
   const pipelineStage = columnFilters.find((f) => f.id === 'pipeline_stage')?.value as string | undefined;
   const sourceSite = columnFilters.find((f) => f.id === 'source_site')?.value as string | undefined;
+  const [ownershipFilter, setOwnershipFilter] = useState<'' | 'unclaimed' | 'claimed' | 'assigned' | 'mine'>('');
   const page = pagination.pageIndex + 1;
 
   // The active filters, in one place so the table query and the export can never
@@ -109,6 +169,7 @@ const Leads: React.FC = () => {
   const exportParams = {
     sort_by: sortParam as any, sort_order: sortOrder as any,
     score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
+    ownership: ownershipFilter || undefined,
     filter: globalFilter || undefined, experience: experienceFilter || undefined,
     location_type: workplaceFilter || undefined,
     // "₹5L+" means a numeric floor (salary_min), not the has_salary flag -- the old
@@ -118,10 +179,11 @@ const Leads: React.FC = () => {
   };
 
   const { data, isLoading, refetch, isFetching, isError, error } = useQuery(
-    ['leads', page, pagination.pageSize, sortParam, sortOrder, scoreBand, pipelineStage, sourceSite, globalFilter, experienceFilter, workplaceFilter, salaryFilter],
+    ['leads', page, pagination.pageSize, sortParam, sortOrder, scoreBand, pipelineStage, sourceSite, ownershipFilter, globalFilter, experienceFilter, workplaceFilter, salaryFilter],
     () => leadsApi.list({
       page, limit: pagination.pageSize, sort_by: sortParam as any, sort_order: sortOrder as any,
       score_band: scoreBand, pipeline_stage: pipelineStage, source_site: sourceSite,
+      ownership: ownershipFilter || undefined,
       filter: globalFilter || undefined, experience: experienceFilter || undefined,
       location_type: workplaceFilter || undefined,
       salary_min: salaryFilter && salaryFilter !== 'any' ? Number(salaryFilter) * 100000 : undefined,
@@ -234,7 +296,7 @@ const Leads: React.FC = () => {
     ) }),
     columnHelper.accessor('lead_score', { header: 'Score', cell: (info) => {
       const band = info.row.original.score_band as 'hot' | 'warm' | 'cold'; const meta = SCORE_BAND_META[band];
-      return <div className="flex items-center gap-2"><span className="inline-flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-[13px] font-bold tabular-nums text-gradient">{info.getValue()}</span>{meta && <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />}</div>;
+      return <div className="flex items-center gap-2"><span className="inline-flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-[13px] font-bold tabular-nums text-ink-strong">{info.getValue()}</span>{meta && <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />}</div>;
     } }),
     columnHelper.accessor('company_name', { header: 'Company', cell: (info) => (
       <div className="min-w-0"><p className="truncate font-medium text-foreground">{info.getValue() || '—'}</p>{info.row.original.company_domain && <p className="truncate text-xs text-muted-foreground">{info.row.original.company_domain}</p>}</div>
@@ -295,16 +357,22 @@ const Leads: React.FC = () => {
     columnHelper.accessor('hr_name', { header: 'HR Contact', cell: (info) => {
       const lead = info.row.original;
       return lead.hr_name ? (
-        <div className="flex items-center gap-2.5"><Avatar name={lead.hr_name} size="sm" /><div className="min-w-0"><p className="truncate text-[13px] font-medium">{lead.hr_name}</p>{lead.hr_email && <p className="truncate text-xs text-muted-foreground">{lead.hr_email}</p>}</div></div>
+        <div className="flex items-center gap-2.5"><Avatar name={lead.hr_name} size="sm" /><div className="min-w-0"><p className="truncate text-[13px] font-medium">{lead.hr_name}</p>{(lead as any).hr_title ? <p className="truncate text-xs text-muted-foreground">{(lead as any).hr_title}</p> : lead.hr_email ? <p className="truncate text-xs text-muted-foreground">{lead.hr_email}</p> : null}</div></div>
       ) : <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning"><Sparkles className="h-3 w-3" />needs enrichment</span>;
     } }),
-    // Ownership was invisible in the table even though every lead can be assigned;
-    // a rep scanning a queue cannot tell which rows are theirs.
+    // Ownership is explicit: Unclaimed / Claimed by X / Assigned to Y / both.
     columnHelper.display({ id: 'assigned', header: 'Owner', cell: ({ row }) => {
       const l = row.original as any;
-      const who = l.assigned_to_email || l.assigned_to;
-      return who ? <span className="block max-w-[170px] truncate text-[12px] text-muted-foreground" title={String(who)}>{String(who).split('@')[0]}</span>
-        : <span className="text-[12px] text-muted-foreground/60">Unassigned</span>;
+      const claimed = l.claimed_by_email || l.claimed_by;
+      const assigned = l.assigned_to_email || l.assigned_to;
+      const short = (v: unknown) => String(v).split('@')[0];
+      if (claimed && assigned && claimed !== assigned)
+        return <span className="block max-w-[190px] truncate text-[12px] text-muted-foreground" title={`Claimed by ${claimed}, assigned to ${assigned}`}>Claimed by {short(claimed)} · → {short(assigned)}</span>;
+      if (assigned)
+        return <span className="block max-w-[170px] truncate text-[12px] text-muted-foreground" title={String(assigned)}>Assigned to {short(assigned)}</span>;
+      if (claimed)
+        return <span className="block max-w-[170px] truncate text-[12px] text-muted-foreground" title={String(claimed)}>Claimed by {short(claimed)}</span>;
+      return <span className="text-[12px] text-muted-foreground/60">Unclaimed</span>;
     } }),
     columnHelper.display({ id: 'verification', header: 'Verification', cell: ({ row }) => {
       const lead = row.original; const em = emailStatusMeta(lead.email_status); const wm = whatsappStatusMeta(lead.whatsapp_status);
@@ -326,8 +394,9 @@ const Leads: React.FC = () => {
       ) : <span className="text-[12px] text-muted-foreground">—</span>;
     } }),
     columnHelper.accessor('created_at', { header: 'Discovered', cell: (info) => <span className="text-[13px] text-muted-foreground">{formatDate(info.getValue())}</span> }),
-    // One Eye button (open) + one master Actions button (everything else). No chips, no
-    // three-dots: every row action lives inside the single grouped menu.
+    // Row actions: Eye (open) + dedicated Claim / Assign pills + one Actions
+    // menu for the pipeline (enrich → outreach → manage). Claim/assign live
+    // outside the menu so ownership takes one obvious click.
     columnHelper.display({ id: 'actions', header: () => <span className="sr-only">Actions</span>, cell: ({ row }) => {
       const lead = row.original;
       const pending = busy[lead.id];
@@ -335,6 +404,7 @@ const Leads: React.FC = () => {
       const done = (['contacted', 'replied', 'converted'] as string[]).includes(lead.pipeline_stage);
       const emailOk = lead.email_status === 'valid';
       const waOk = lead.whatsapp_status === 'registered';
+      const unclaimed = !(lead as any).claimed_by && !(lead as any).assigned_to;
       return (
         <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
           {done && (
@@ -342,24 +412,50 @@ const Leads: React.FC = () => {
               <CheckCircle2 className="h-3 w-3" />{lead.pipeline_stage === 'replied' ? 'Replied' : 'Contacted'}
             </span>
           )}
+          {unclaimed && (
+            <button
+              type="button"
+              title="Claim this lead — it becomes yours instantly"
+              aria-label={`Claim ${lead.company_name || 'lead'}`}
+              disabled={!!pending}
+              onClick={() => act(lead.id, 'claim', leadsApi.claim(lead.id), 'Lead claimed')}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-primary px-3.5 py-[7px] text-[12px] font-semibold text-primary-foreground shadow-sm transition-all hover:bg-primary-hover hover:shadow-md hover:-translate-y-px active:translate-y-0 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {pending === 'claim' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserPlus className="h-3.5 w-3.5" />}
+              {pending === 'claim' ? 'Claiming…' : 'Claim'}
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              title="Assign this lead to a team member"
+              aria-label={`Assign ${lead.company_name || 'lead'}`}
+              onClick={() => setAssignLead(lead as any)}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-3.5 py-[7px] text-[12px] font-semibold text-foreground shadow-sm transition-all hover:border-primary/50 hover:bg-primary-soft hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <UserCheck className="h-3.5 w-3.5" />
+              Assign
+            </button>
+          )}
           <button
             type="button"
             title="Open full record"
             aria-label={`Open ${lead.company_name || 'lead'}`}
             onClick={() => navigate(`/leads/${lead.id}`)}
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-border text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/[0.08] hover:text-[#8b7bf7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-border text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary-soft hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Eye className="h-3.5 w-3.5" />
           </button>
           <Menu ariaLabel={`Actions for ${lead.company_name || 'lead'}`} align="end" trigger={
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-primary/30 bg-primary/[0.08] px-3 py-1 text-[12px] font-semibold text-[#8b7bf7] transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-[#8b7bf7]" role="button" tabIndex={0}>
+              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-primary/30 bg-primary-soft px-3 py-1 text-[12px] font-semibold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" role="button" tabIndex={0}>
               {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
               {pending ? 'Working…' : 'Actions'}
               <ChevronDown className="h-3 w-3 opacity-60" />
             </span>
           } items={[
             { label: 'Open full record', icon: <Eye />, onSelect: () => navigate(`/leads/${lead.id}`) },
-            { label: 'Enrich · Full Army', section: 'Enrich', hint: 'free', icon: <Radar />, disabled: done, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, 'auto'), 'Full-army enrichment started') },
+            // ONE primary Enrich: the engine picks OSINT → Snov → ContactOut → Apollo.
+            { label: 'Enrich', section: 'Enrich', hint: 'auto', icon: <Radar />, disabled: done, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, 'auto'), 'Enrichment started') },
             ...ENRICH_PROVIDERS.filter((p) => p.key !== 'auto').map((pc) => ({ label: `Enrich · ${pc.label}`, section: 'Enrich', hint: pc.hint, icon: <Sparkles />, disabled: done, onSelect: () => act(lead.id, 'enrich', leadsApi.enrich(lead.id, pc.key), `${pc.label} enrichment started`) })),
             { label: 'Verify contact', section: 'Outreach', icon: <BadgeCheck />, disabled: done, onSelect: () => act(lead.id, 'verify', leadsApi.verify(lead.id), 'Verification started') },
             { label: 'Draft outreach', section: 'Outreach', icon: <FileText />, disabled: done, onSelect: () => act(lead.id, 'draft', leadsApi.draft(lead.id, 'both'), 'Draft started') },
@@ -371,8 +467,7 @@ const Leads: React.FC = () => {
         </div>
       );
     } }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [leadRows, selectedIds, expanded, visibility, density, navigate, toast]);
+  ], [leadRows, selectedIds, expanded, visibility, density, navigate, toast, busy, isAdmin]);
 
   const table = useReactTable({
     data: leadRows, columns, state: { sorting, columnFilters, globalFilter, pagination, columnVisibility: visibility },
@@ -408,6 +503,7 @@ const Leads: React.FC = () => {
         <Select value={salaryFilter} onChange={(e) => setSalaryFilter(e.target.value as never)} className="w-36" aria-label="Salary"><option value="">Any salary</option><option value="any">Salary disclosed</option><option value="5">₹5L+</option><option value="10">₹10L+</option><option value="20">₹20L+</option></Select>
         <Select value={scoreBand || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'score_band'), ...(e.target.value ? [{ id: 'score_band', value: e.target.value }] : [])])} className="w-32" aria-label="Score"><option value="">All scores</option><option value="hot">Hot ≥70</option><option value="warm">Warm 40+</option><option value="cold">Cold</option></Select>
         <Select value={pipelineStage || ''} onChange={(e) => setColumnFilters((f) => [...f.filter((x) => x.id !== 'pipeline_stage'), ...(e.target.value ? [{ id: 'pipeline_stage', value: e.target.value }] : [])])} className="w-40" aria-label="Stage"><option value="">All stages</option><option value="discovered">New</option><option value="enriched">Enriched</option><option value="verified">Verified</option><option value="drafted">Ready to send</option><option value="contacted">Sent</option><option value="replied">Replied</option><option value="bounced">Failed</option><option value="contact_unavailable">Needs enrichment</option><option value="verification_failed">Verify failed</option><option value="send_failed">Send failed</option><option value="suppressed">Suppressed</option></Select>
+        <Select value={ownershipFilter} onChange={(e) => { setOwnershipFilter(e.target.value as never); setPagination((p) => ({ ...p, pageIndex: 0 })); }} className="w-36" aria-label="Owner"><option value="">All owners</option><option value="unclaimed">Unclaimed</option><option value="claimed">Claimed</option><option value="assigned">Assigned</option><option value="mine">Mine</option></Select>
         <div className="h-6 w-px bg-border" />
         <Menu align="start" ariaLabel="Columns" trigger={<Button variant="outline" size="sm"><Columns3 className="h-4 w-4" />Columns</Button>} items={ALL_COLUMNS.map((c) => ({ label: c.label, checked: visibility[c.id] !== false, onSelect: () => setVisibility((v) => ({ ...v, [c.id]: v[c.id] === false })) }))} />
         <Menu align="start" ariaLabel="Density" trigger={<Button variant="outline" size="sm" title={`Row density: ${density}`}><LayoutGrid className="h-4 w-4" />{density === 'compact' ? 'Compact' : 'Comfortable'}</Button>} items={[{ label: 'Comfortable', checked: density === 'comfortable', onSelect: () => setDensity('comfortable') }, { label: 'Compact', checked: density === 'compact', onSelect: () => setDensity('compact') }]} />
@@ -435,8 +531,12 @@ const Leads: React.FC = () => {
             <div className="card flex flex-wrap items-center gap-2.5 border-primary/30 bg-primary-soft/60 px-4 py-3">
               <Users className="h-4 w-4 text-primary" /><span className="text-sm font-medium">{selectedIds.size} selected</span>
               <div className="h-5 w-px bg-border" />
-              <span className="text-xs text-muted-foreground">Enrich via:</span>
-              {ENRICH_PROVIDERS.map((p) => <Button key={p.key} variant="secondary" size="sm" onClick={() => { if (window.confirm(`Enrich ${selectedIds.size} leads via ${p.label}? Credits are consumed per lead (on-demand).`)) bulkEnrichMutation.mutate({ ids: Array.from(selectedIds), provider: p.key }); }}><Sparkles className="h-3.5 w-3.5" />{p.label.replace(' (auto)', '')}</Button>)}
+              <span className="text-xs text-muted-foreground">Enrich:</span>
+              <Button variant="secondary" size="sm" onClick={() => { if (window.confirm(`Enrich ${selectedIds.size} leads? The engine picks OSINT → Snov → ContactOut → Apollo automatically.`)) bulkEnrichMutation.mutate({ ids: Array.from(selectedIds), provider: 'auto' }); }}><Sparkles className="h-3.5 w-3.5" />Enrich {selectedIds.size}</Button>
+              <div className="h-5 w-px bg-border" />
+              <span className="text-xs text-muted-foreground">Own:</span>
+              <Button variant="secondary" size="sm" onClick={() => bulkClaimMutation.mutate(Array.from(selectedIds))} loading={bulkClaimMutation.isLoading}><Users className="h-3.5 w-3.5" />Claim {selectedIds.size}</Button>
+              {isAdmin && <Button variant="secondary" size="sm" onClick={() => setBulkAssignOpen(true)}><Users className="h-3.5 w-3.5" />Assign {selectedIds.size}</Button>}
               <Select value={draftChannel} onChange={(e) => setDraftChannel(e.target.value as any)} className="h-8 w-32" aria-label="Channel"><option value="both">Both</option><option value="email">Email</option><option value="whatsapp">WhatsApp</option></Select>
               <Button size="sm" onClick={() => { if (window.confirm(`Generate drafts for ${selectedIds.size} leads?`)) bulkDraftMutation.mutate({ leadIds: Array.from(selectedIds), channel: draftChannel }); }} loading={bulkDraftMutation.isLoading}><Play className="h-3.5 w-3.5" />Draft</Button>
               <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelectedIds(new Set())}>Clear</Button>
@@ -519,6 +619,50 @@ const Leads: React.FC = () => {
       </div>
 
       <ImportLeadsModal open={importOpen} onClose={() => setImportOpen(false)} onDone={onImported} />
+
+      {bulkAssignOpen && (
+        <div className="fixed inset-0 z-overlay grid place-items-center bg-black/50 p-4" onClick={() => setBulkAssignOpen(false)}>
+          <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-4 shadow-float" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Assign selected leads">
+            <p className="mb-1 text-sm font-semibold">Assign {selectedIds.size} leads to</p>
+            <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} placeholder="Search member…" className="input mb-2" aria-label="Search member" />
+            <div className="max-h-64 space-y-1 overflow-auto">
+              {members.filter((m) => m.email.toLowerCase().includes(memberSearch.toLowerCase())).map((m) => (
+                <button key={m.id} onClick={() => bulkAssignMutation.mutate({ ids: Array.from(selectedIds), userId: m.id })} className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-accent">
+                  <span className="min-w-0 flex-1 truncate">{m.email}</span>
+                  <span className="text-xs capitalize text-muted-foreground">{m.role}</span>
+                </button>
+              ))}
+              {members.length === 0 && <p className="text-xs text-muted-foreground">No members found.</p>}
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setBulkAssignOpen(false)}>Cancel</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {assignLead && (
+        <div className="fixed inset-0 z-overlay grid place-items-center bg-black/50 p-4" onClick={() => setAssignLead(null)}>
+          <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-4 shadow-float" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Assign lead">
+            <p className="mb-1 text-sm font-semibold">Assign to</p>
+            <p className="mb-3 truncate text-xs text-muted-foreground">{(assignLead as any).company_name || 'lead'}</p>
+            <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} placeholder="Search member…" className="input mb-2" aria-label="Search member" />
+            <div className="max-h-64 space-y-1 overflow-auto">
+              {members.filter((m) => m.email.toLowerCase().includes(memberSearch.toLowerCase())).map((m) => (
+                <button key={m.id} onClick={() => assignMutation.mutate({ id: assignLead.id, userId: m.id })} className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-accent">
+                  <span className="min-w-0 flex-1 truncate">{m.email}</span>
+                  <span className="text-xs capitalize text-muted-foreground">{m.role}</span>
+                </button>
+              ))}
+              {members.length === 0 && <p className="text-xs text-muted-foreground">No members found.</p>}
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAssignLead(null)}>Cancel</Button>
+              <Button size="sm" loading={assignMutation.isLoading} onClick={() => assignLead && assignMutation.mutate({ id: assignLead.id, userId: null })}>Unassign</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

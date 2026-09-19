@@ -149,7 +149,7 @@ const Analytics: React.FC = () => {
                     </div>
                     <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
                       <div
-                        className="h-2.5 rounded-full bg-gradient-to-r from-primary to-indigo-400 transition-all duration-500"
+                        className="h-2.5 rounded-full bg-primary transition-all duration-500"
                         style={{ width: `${pct}%` }}
                       />
                     </div>

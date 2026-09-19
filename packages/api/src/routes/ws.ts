@@ -1,7 +1,9 @@
 import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import IORedis from 'ioredis';
-import { authenticate } from '../middleware/auth';
+import { streamToken } from './auth';
+import { getDB } from '../utils/db';
 import { getRedis } from '../utils/redis';
+import { OPS_CHANNEL, SHARED_CHANNEL } from '../utils/sse';
 
 function setSSEHeaders(reply: FastifyReply) {
   // Raw headers on the hijacked response: Fastify must NOT manage this reply
@@ -13,21 +15,69 @@ function setSSEHeaders(reply: FastifyReply) {
   reply.raw.setHeader('X-Accel-Buffering', 'no'); // nginx/Caddy must not buffer
 }
 
+type StreamUser = { id: string; role: string };
+
 /**
- * Open one SSE stream for `userId`, fanning in both their personal channel
- * (direct actions) and the broadcast channel (army / scheduler completions,
- * published under sentinel requesters no browser subscribes to). Without
- * broadcast, background wave completions never reach any UI.
+ * Resolve the streaming subject from the access token, which arrives either as
+ * `Authorization: Bearer` (non-browser clients) or in the HttpOnly `sse_auth`
+ * cookie.
  *
- * Shared by /sse (header/JWT-authenticated) and /sse/token (query-param token,
- * because EventSource cannot set an Authorization header). Previously these were
- * two near-identical 50-line copies; the query-param copy had no revocation
- * check, so a logged-out or revoked token kept streaming lead data.
+ * The cookie exists because `EventSource` cannot set request headers, and the
+ * old workaround -- `GET /sse/token?token=<jwt>` -- put a full 7-day access token
+ * into the URL, where it landed in nginx access logs, browser history, and any
+ * Referer header. A cookie keeps the credential out of all of those.
+ */
+async function resolveStreamUser(token: string): Promise<StreamUser | null> {
+  if (!token) return null;
+
+  const redis = getRedis();
+  if (redis) {
+    const blacklisted = await redis.get(`bl_:${token}`);
+    if (blacklisted) return null;
+  }
+
+  let userId: string;
+  try {
+    userId = (await getJwtVerify()(token)).id;
+  } catch {
+    return null;
+  }
+  if (!userId) return null;
+
+  // The subject must still exist: tokens live 7d and survive account deletion or
+  // a DB re-seed, and opening a stream for a ghost id leaks nothing useful while
+  // holding a Redis connection forever. The role decides whether the caller may
+  // subscribe to the admin-only ops channel.
+  const rows = await getDB().unsafe(`SELECT id, role FROM users WHERE id = $1`, [userId]);
+  const row = (rows as unknown as Array<{ id: string; role: string }>)[0];
+  return row ? { id: row.id, role: row.role } : null;
+}
+
+// The JWT verifier is only reachable through the Fastify instance, which the
+// route handler owns; this indirection keeps resolveStreamUser free of Fastify
+// plumbing while staying a single implementation.
+let jwtVerifyImpl: (<T>(token: string) => Promise<T>) | null = null;
+function getJwtVerify() {
+  if (!jwtVerifyImpl) throw new Error('SSE JWT verifier not initialised');
+  return jwtVerifyImpl as (token: string) => Promise<{ id: string }>;
+}
+
+/**
+ * Open one SSE stream for `user`, fanning in the channels that user is entitled
+ * to:
+ *   user:{id}:sse - their own events and events for leads they own
+ *   shared:sse    - unassigned leads, which every authenticated user may read
+ *   ops:sse       - deployment operations, admins only
+ *
+ * Each channel maps exactly onto an existing REST permission, so the stream
+ * cannot disclose more than the caller could already fetch. The previous
+ * implementation subscribed everyone to a single broadcast channel carrying every
+ * event for every user's leads.
  */
 async function openUserStream(
   req: FastifyRequest,
   reply: FastifyReply,
-  userId: string,
+  user: StreamUser,
 ): Promise<FastifyReply> {
   reply.hijack();
   setSSEHeaders(reply);
@@ -42,7 +92,9 @@ async function openUserStream(
   // Dedicated connection: sharing the app's command client would serialize
   // pub/sub against request traffic and leak subscriptions on close.
   const subscriber: IORedis = redis.duplicate();
-  await subscriber.subscribe(`user:${userId}:sse`, 'broadcast:sse');
+  const channels = [`user:${user.id}:sse`, SHARED_CHANNEL];
+  if (user.role === 'admin') channels.push(OPS_CHANNEL);
+  await subscriber.subscribe(...channels);
 
   const send = (data: unknown) => {
     if (req.raw.destroyed || reply.raw.writableEnded) return;
@@ -57,7 +109,7 @@ async function openUserStream(
     }
   });
 
-  send({ type: 'connected', user_id: userId });
+  send({ type: 'connected', user_id: user.id });
 
   const heartbeat = setInterval(() => {
     send({ type: 'heartbeat', timestamp: Date.now() });
@@ -78,86 +130,13 @@ async function openUserStream(
 }
 
 export const wsRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.get(
-    '/sse',
-    { preHandler: [authenticate] },
-    async (req, reply) => openUserStream(req, reply, (req.user as { id: string }).id),
-  );
+  jwtVerifyImpl = (token: string) => fastify.jwt.verify(token);
 
-  fastify.get('/sse/token', async (req, reply) => {
-    const token = (req.query as Record<string, string>).token;
-    if (!token) {
-      return reply.status(401).send({ error: 'Missing token' });
-    }
-
-    let userId: string;
-    try {
-      userId = (await reply.server.jwt.verify<{ id: string }>(token)).id;
-    } catch {
-      return reply.status(401).send({ error: 'Invalid token' });
-    }
-
-    // Revocation must apply here too: logout blacklists the token, but EventSource
-    // authenticates via query param and skipped that check, so a stream stayed open
-    // (and could be re-opened) after logout.
-    const redis = getRedis();
-    if (redis) {
-      const blacklisted = await redis.get(`bl_:${token}`);
-      if (blacklisted) {
-        return reply.status(401).send({ error: 'Token has been revoked' });
-      }
-    }
-
-    // The subject must still exist: tokens live 7d and survive account deletion or
-    // a DB re-seed, and opening a stream for a ghost id leaks nothing useful while
-    // holding a Redis connection forever.
-    const { getDB } = await import('../utils/db');
-    const existing = await getDB().unsafe(`SELECT 1 FROM users WHERE id = $1`, [userId]);
-    if ((existing as unknown[]).length === 0) {
+  fastify.get('/sse', async (req, reply) => {
+    const user = await resolveStreamUser(streamToken(req));
+    if (!user) {
       return reply.status(401).send({ error: 'Unauthorized' });
     }
-
-    return openUserStream(req, reply, userId);
+    return openUserStream(req, reply, user);
   });
-
-  fastify.get(
-    '/live/stats',
-    { preHandler: [authenticate] },
-    async (req, reply) => {
-      reply.hijack();
-      setSSEHeaders(reply);
-
-      const redis = getRedis();
-
-      const send = (data: unknown) => {
-        if (req.raw.destroyed || reply.raw.writableEnded) return;
-        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      };
-
-      if (redis) {
-        const stats = await redis.hgetall('stats:live');
-        send({ type: 'stats', data: stats });
-      } else {
-        send({ type: 'stats', data: {} });
-      }
-
-      const interval = setInterval(async () => {
-        if (!redis) return;
-        try {
-          const updated = await redis.hgetall('stats:live');
-          send({ type: 'stats_update', data: updated });
-        } catch {
-          // A dropped Redis connection degrades to no updates rather than killing
-          // the request loop with an unhandled rejection.
-        }
-      }, 5000);
-
-      req.raw.on('close', () => {
-        clearInterval(interval);
-        if (!reply.raw.writableEnded) reply.raw.end();
-      });
-
-      return reply;
-    },
-  );
 };

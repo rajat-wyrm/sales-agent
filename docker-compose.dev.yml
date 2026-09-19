@@ -1,0 +1,17 @@
+# Development overlay -- bind-mounts the worker source for live iteration.
+#
+# The base docker-compose.yml intentionally does NOT mount ./packages/scrapers
+# over the image's /app: a bind mount makes the container run whatever is on the
+# host filesystem (an uncommitted edit, a stale .pyc, a half-finished refactor)
+# instead of the artifact built into the image. Use this overlay only for local
+# development, and always name it explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# It is NOT called docker-compose.override.yml on purpose: that filename is
+# auto-loaded by every `docker compose` invocation, which would silently put the
+# mount back into production.
+services:
+  workers:
+    volumes:
+      - ./packages/scrapers:/app

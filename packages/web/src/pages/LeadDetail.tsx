@@ -54,12 +54,6 @@ type EditingState = {
   body: string;
 } | null;
 
-function sanitizeHtml(html: string): string {
-  const div = document.createElement('div');
-  div.textContent = html;
-  return div.innerHTML;
-}
-
 const TIMELINE_TYPE_LABELS: Record<string, string> = {
   created: 'Lead discovered',
   enrichment_started: 'Enrichment started',
@@ -109,6 +103,25 @@ const LeadDetail: React.FC = () => {
   const enrichmentReady = providerStatus?.enrichment as Record<string, boolean> | undefined;
   const sendingReady = providerStatus?.sending;
 
+  // Live enrichment lifecycle: poll the persistent job while it is active so
+  // the operator sees Queued → Running → Completed/Partial/Failed instead of
+  // a fire-and-forget button. Polling stops on terminal states.
+  const { data: enrichmentState } = useQuery(
+    ['lead-enrichment', id],
+    () => leadsApi.enrichment(id!),
+    {
+      enabled: !!id,
+      retry: false,
+      refetchInterval: (data: any) => {
+        const jobs = data?.jobs || [];
+        const active = jobs.some((j: any) => j.status === 'queued' || j.status === 'running');
+        return active ? 4000 : false;
+      },
+    },
+  );
+  const activeJob = (enrichmentState?.jobs || []).find((j: any) => j.status === 'queued' || j.status === 'running');
+  const lastJob = (enrichmentState?.jobs || [])[0];
+
   // Backend -> frontend: live updates for this lead (enrich/verify/draft/send
   // completing elsewhere refresh the detail, timeline and score in place).
   // Scoped to THIS lead's lifecycle events only — heartbeats, connects and
@@ -118,6 +131,7 @@ const LeadDetail: React.FC = () => {
       queryClient.invalidateQueries(['lead', id]);
       queryClient.invalidateQueries(['lead-timeline', id]);
       queryClient.invalidateQueries(['lead-score', id]);
+      queryClient.invalidateQueries(['lead-enrichment', id]);
     }
   });
 
@@ -170,7 +184,8 @@ const LeadDetail: React.FC = () => {
         setExtracting(false);
         queryClient.invalidateQueries(['lead', id]);
         queryClient.invalidateQueries(['lead-timeline', id]);
-        toast({ title: 'HR extraction started', description: 'This may take a few moments.', variant: 'success' });
+        queryClient.invalidateQueries(['lead-enrichment', id]);
+        toast({ title: 'HR extraction started', description: 'Watch the live status badge — no need to refresh.', variant: 'success' });
       },
       onError: (err) => {
         setExtracting(false);
@@ -178,6 +193,17 @@ const LeadDetail: React.FC = () => {
       },
     },
   );
+
+  // All hooks above the early returns: anything below `if (isLoading) return`
+  // renders conditionally and breaks hook order (React #310).
+  const claimMutation = useMutation(() => leadsApi.claim(id!), {
+    onSuccess: () => {
+      queryClient.invalidateQueries(['lead', id]);
+      queryClient.invalidateQueries(['lead-timeline', id]);
+      toast({ title: 'Lead claimed', variant: 'success' });
+    },
+    onError: (e) => toast({ title: 'Claim failed', description: (e as Error).message, variant: 'error' }),
+  });
 
   if (isLoading) return <PageLoader label="Loading lead..." />;
 
@@ -287,10 +313,17 @@ const LeadDetail: React.FC = () => {
   const assignedUser = users.find((u: any) => u.id === lead.assigned_to);
   const currentUserId = useAuthStore.getState().user?.id;
   const isAdmin = useAuthStore.getState().user?.role === 'admin';
-  const assignedLabel = assignedUser?.email
-    || (lead.assigned_to === currentUserId ? 'You' : null)
-    || (isAdmin ? lead.assigned_to : null)
-    || 'Unassigned';
+  const shortMail = (v: unknown) => String(v).split('@')[0];
+  const claimedEmail = (lead as any).claimed_by_email;
+  const assignedEmail = assignedUser?.email || (lead as any).assigned_to_email;
+  const ownershipLabel = claimedEmail && assignedEmail && claimedEmail !== assignedEmail
+    ? `Claimed by ${shortMail(claimedEmail)} · Assigned to ${shortMail(assignedEmail)}`
+    : assignedEmail
+      ? `Assigned to ${assignedEmail === currentUserId || lead.assigned_to === currentUserId ? 'you' : shortMail(assignedEmail)}`
+      : claimedEmail
+        ? `Claimed by ${lead.claimed_by === currentUserId || (lead as any).claimed_by === currentUserId ? 'you' : shortMail(claimedEmail)}`
+        : assignedEmail || 'Unassigned';
+  const assignedLabel = ownershipLabel;
   const bandMeta = SCORE_BAND_META[lead.score_band];
   const stageMetaV = stageMeta(lead.pipeline_stage);
   const emailMeta = emailStatusMeta(lead.email_status);
@@ -304,7 +337,7 @@ const LeadDetail: React.FC = () => {
         ? `Snov.io uses company name + HR name to find email/phone. Good fallback. Per-row manual trigger — credits only on your click.${enrichmentReady?.snovio === false ? ' Key missing.' : ''}`
         : extractProvider === 'osint'
           ? 'OSINT fallback searches public sources for contact info. Lowest confidence. Free — no credits.'
-          : 'Auto: ContactOut → Snov.io → OSINT. Paid providers run per-row on your click only — no credits consumed until you click Enrich.';
+          : 'Auto: OSINT → Snov.io → ContactOut → Apollo. Free sources first, paid only for missing fields. No credits consumed until you click Enrich.';
 
 // Values that behave like enums (single word, safe to title-case for display).
 const ENUM_LIKE_KEYS = new Set([
@@ -322,7 +355,7 @@ const ENUM_LIKE_KEYS = new Set([
         </Link>
 
         <div className="card overflow-hidden">
-          <div className="border-b border-border bg-gradient-to-br from-primary-soft/60 via-transparent to-transparent p-5">
+          <div className="border-b border-border bg-sage-soft/50 p-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -346,10 +379,25 @@ const ENUM_LIKE_KEYS = new Set([
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button onClick={handleEnrich} loading={extracting || enrichMutation.isLoading} variant="secondary">
+                <Button onClick={handleEnrich} loading={extracting || enrichMutation.isLoading} variant="secondary" title="One-click enrich: OSINT → Snov → ContactOut → Apollo automatically">
                   <Sparkles className="h-4 w-4" />
-                  {extracting ? 'Extracting…' : 'Enrich'}
+                  {extracting ? 'Enriching…' : 'Enrich'}
                 </Button>
+                {activeJob ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-info/40 bg-info/10 px-2.5 py-1 text-[11px] font-medium text-info" title={`Provider: ${activeJob.provider}`}>
+                    <Loader2 className="h-3 w-3 animate-spin" />Enrichment {activeJob.status} · {activeJob.current_stage}
+                  </span>
+                ) : lastJob ? (
+                  <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${lastJob.status === 'completed' ? 'border-success/40 bg-success/10 text-success' : lastJob.status === 'partial' ? 'border-warning/40 bg-warning/10 text-warning' : 'border-border text-muted-foreground'}`} title={`Provider: ${lastJob.provider}`}>
+                    {lastJob.status === 'completed' && <CheckCircle2 className="h-3 w-3" />}Enriched · {lastJob.status} via {lastJob.provider}
+                  </span>
+                ) : null}
+                {!(lead as any).claimed_by && !lead.assigned_to && (
+                  <Button onClick={() => claimMutation.mutate()} loading={claimMutation.isLoading} variant="outline">
+                    <UserPlus className="h-4 w-4" />
+                    Claim Lead
+                  </Button>
+                )}
                 <Button
                   onClick={() => runAction(leadsApi.verify(lead.id), 'Verification completed')}
                   disabled={lead.pipeline_stage === 'verified' || lead.pipeline_stage === 'discovered'}
@@ -418,10 +466,10 @@ const ENUM_LIKE_KEYS = new Set([
         <CardContent>
           <div className="flex flex-wrap gap-2">
             {[
-              { value: undefined, label: 'Auto (ContactOut → Snov.io → OSINT)', key: undefined },
+              { value: undefined, label: 'Auto (OSINT → Snov.io → ContactOut → Apollo)', key: undefined },
               { value: 'contactout', label: 'ContactOut', key: 'contactout' },
               { value: 'snovio', label: 'Snov.io', key: 'snovio' },
-              { value: 'osint', label: 'OSINT Fallback', key: 'osint' },
+              { value: 'osint', label: 'OSINT first', key: 'osint' },
             ].map((opt) => {
               // Paid providers show live configured/NOT-CONFIGURED state;
               // OSINT/Auto need no key. Keys are never exposed — booleans only.
@@ -554,6 +602,8 @@ const ENUM_LIKE_KEYS = new Set([
               <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">
                 <p className="text-xs text-muted-foreground">HR Contact</p>
                 <p className="mt-1 text-sm font-medium">{lead.hr_name}</p>
+                {(lead as any).hr_title && <p className="text-[13px] text-muted-foreground">{(lead as any).hr_title}{(lead as any).hr_department ? ` · ${(lead as any).hr_department}` : ''}{(lead as any).hr_location ? ` · ${(lead as any).hr_location}` : ''}</p>}
+                {(lead as any).hr_email_verified && <p className="mt-1 text-xs font-medium text-success">✓ Verified email</p>}
                 {lead.hr_linkedin_url && (
                   <a
                     href={lead.hr_linkedin_url}
@@ -580,7 +630,7 @@ const ENUM_LIKE_KEYS = new Set([
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
                 <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" />Why this score</span>
-                <span className="text-gradient text-lg font-semibold tabular-nums">{scoreData.score}</span>
+                <span className="text-ink-strong text-lg font-semibold tabular-nums">{scoreData.score}</span>
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -609,10 +659,16 @@ const ENUM_LIKE_KEYS = new Set([
               <p className="mb-4 text-[13px] leading-relaxed text-muted-foreground">{lead.about_company}</p>
             )}
             <h4 className="mb-2 text-[13px] font-semibold text-foreground">Job Description</h4>
-            <div
-              className="max-h-64 overflow-y-auto rounded-lg border border-border bg-muted/30 p-4 text-[13px] leading-relaxed text-muted-foreground"
-              dangerouslySetInnerHTML={{ __html: sanitizeHtml(lead.job_description || 'No description available') }}
-            />
+            {/* Rendered as a plain string. The old path ran the text through a
+                helper that set textContent and read innerHTML back -- that
+                ESCAPES rather than sanitizes, so '<b>x</b>' displayed as
+                '&lt;b&gt;x&lt;/b&gt;' -- and then passed the result to
+                dangerouslySetInnerHTML. React escapes a string child for us, so
+                the raw description is correct and the HTML sink is gone.
+                whitespace-pre-wrap keeps the source line breaks legible. */}
+            <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-muted/30 p-4 text-[13px] leading-relaxed text-muted-foreground">
+              {lead.job_description || 'No description available'}
+            </div>
           </CardContent>
         </Card>
       </div>

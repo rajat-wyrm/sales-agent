@@ -232,7 +232,7 @@ Or let n8n run it on a cron schedule.
 ```bash
 docker compose exec postgres psql -U postgres -d leads_db   # interactive SQL
 ```
-Schema is auto-applied on every `./up.sh` from `packages/api/database/schema/` (idempotent, `IF NOT EXISTS`), organized by concern: `schema/tables/`, `schema/constraints/`, `schema/functions/`, `schema/triggers/`, `schema/indexes/` (applied in that dependency order by `database/utils/apply_schema.sh`). **That folder is the source of truth** — add new tables/columns/indexes/constraints to the matching file there. For an already-deployed prod DB, forward-only deltas go in `database/migrations/` (run via `npm run migrate`).
+Schema is auto-applied on every `./up.sh` from `packages/api/database/schema/` (idempotent, `IF NOT EXISTS`), one file per concern: `schema/tables/tables.sql`, `schema/constraints/constraints.sql`, `schema/functions/functions.sql`, `schema/triggers/triggers.sql`, `schema/indexes/indexes.sql` (applied in that dependency order by `database/utils/apply_schema.sh`). **That folder is the source of truth** — add new tables/columns/indexes/constraints to the matching file there. For an already-deployed prod DB, forward-only deltas go in `database/migrations/` (run via `npm run migrate`).
 
 ---
 

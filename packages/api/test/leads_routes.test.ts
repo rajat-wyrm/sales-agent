@@ -57,6 +57,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('send to do_not_contact lead returns 403', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('do_not_contact')) {
         return [{ do_not_contact: true, email_status: 'valid', whatsapp_status: 'registered' }];
       }
@@ -77,6 +78,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('send to non-flagged lead with verified email succeeds', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('do_not_contact')) {
         return [{ do_not_contact: false, email_status: 'valid', whatsapp_status: 'registered' }];
       }
@@ -98,6 +100,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('send with invalid email status returns 400', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('do_not_contact')) {
         return [{ do_not_contact: false, email_status: 'invalid', whatsapp_status: 'registered' }];
       }
@@ -117,7 +120,10 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
   });
 
   test('verify endpoint enqueues job for verification queue', async () => {
-    mockSqlUnsafe.mockResolvedValue([]);
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      return [];
+    });
 
     const response = await app.inject({
       method: 'POST',
@@ -133,7 +139,15 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
   });
 
   test('enrich endpoint enqueues job for enrichment queue', async () => {
-    mockSqlUnsafe.mockResolvedValue([]);
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      if (query.includes('FROM enrichment_jobs')) return [];
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      if (query.includes('INSERT INTO enrichment_jobs')) {
+        return [{ id: '11111111-1111-4111-8111-111111111111', status: 'queued' }];
+      }
+      return [];
+    });
 
     const response = await app.inject({
       method: 'POST',
@@ -150,6 +164,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('verify-and-send to do_not_contact lead returns 403 without queueing', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('FROM leads l LEFT JOIN hr_contacts')) {
         return [{ do_not_contact: true, email_status: 'valid', whatsapp_status: 'registered', hr_email: 'a@x.com', hr_mobile: null }];
       }
@@ -168,6 +183,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('verify-and-send to suppressed contact returns 403 without queueing', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('FROM suppressions')) {
         return [{ '1': 1 }];
       }
@@ -192,6 +208,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('verify-and-send to clean lead queues a verify-send job', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('FROM suppressions')) return [];
       if (query.includes('FROM leads l LEFT JOIN hr_contacts')) {
         return [{ do_not_contact: false, email_status: 'unknown', whatsapp_status: 'unknown', hr_email: 'hr@x.com', hr_mobile: null }];
@@ -214,6 +231,7 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
 
   test('send to suppressed contact returns 403 without queueing', async () => {
     mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
       if (query.includes('FROM suppressions')) {
         return [{ '1': 1 }];
       }
@@ -230,6 +248,89 @@ describe('Leads API - do_not_contact enforcement (SRS §13.2)', () => {
     });
 
     expect(response.statusCode).toBe(403);
+    expect(mockRedisLpush).not.toHaveBeenCalled();
+  });
+
+  test('claim wins atomically on first try', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      if (query.includes('UPDATE leads SET claimed_by')) {
+        return [{ id: '550e8400-e29b-41d4-a716-446655440000', claimed_by: 'user-1' }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/claim',
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).lead.claimed_by).toBe('user-1');
+  });
+
+  test('claim loses cleanly when already claimed by another member', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      if (query.includes('UPDATE leads SET claimed_by')) return [];
+      if (query.includes('LEFT JOIN users u ON u.id = l.claimed_by')) {
+        return [{ claimed_by: 'other-1', claimed_by_email: 'other@x.com' }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/claim',
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body).error).toMatch(/already claimed/);
+  });
+
+  test('bulk-claim wins unclaimed and reports already-owned', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('UPDATE leads SET claimed_by')) {
+        return [{ id: '550e8400-e29b-41d4-a716-446655440000' }];
+      }
+      if (query.includes('claimed_by_email')) {
+        return [{ id: '660e8400-e29b-41d4-a716-446655440001', claimed_by_email: 'other@x.com' }];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/bulk-claim',
+      payload: { lead_ids: ['550e8400-e29b-41d4-a716-446655440000', '660e8400-e29b-41d4-a716-446655440001'] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.claimed).toEqual(['550e8400-e29b-41d4-a716-446655440000']);
+    expect(body.already_claimed[0].claimed_by_email).toBe('other@x.com');
+  });
+
+  test('duplicate enrich request reuses the live job instead of queueing twice', async () => {
+    mockSqlUnsafe.mockImplementation(async (query: string) => {
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      if (query.includes('FROM enrichment_jobs')) {
+        return [{ id: '22222222-2222-4222-8222-222222222222', status: 'queued' }];
+      }
+      if (query.includes('SELECT 1 FROM leads')) return [{ '?column?': 1 }];
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/leads/550e8400-e29b-41d4-a716-446655440000/enrich',
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(JSON.parse(response.body).deduped).toBe(true);
     expect(mockRedisLpush).not.toHaveBeenCalled();
   });
 });

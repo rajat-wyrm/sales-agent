@@ -15,7 +15,8 @@ export const LEAD_FROM_SQL = `
       JOIN companies c ON l.company_id = c.id
       JOIN job_postings jp ON l.job_posting_id = jp.id
       LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
-      LEFT JOIN users au ON au.id = l.assigned_to`;
+      LEFT JOIN users au ON au.id = l.assigned_to
+      LEFT JOIN users cu ON cu.id = l.claimed_by`;
 
 const xmlEscape = (v: unknown): string => String(v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

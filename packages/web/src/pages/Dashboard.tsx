@@ -1,5 +1,6 @@
 import React from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   AreaChart, Area, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid,
@@ -11,6 +12,7 @@ import { useAuthStore } from '@/stores/auth';
 import {
   Users, Flame, Sun, Snowflake, ShieldAlert, Zap, Activity, BarChart3,
   CheckCircle2, Clock, AlertTriangle, Sparkles, MailCheck, Radar, Radio,
+  Pause, Play,
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatCard, StatCardGrid } from '@/components/ui/stat-card';
@@ -31,14 +33,17 @@ const STAGE_LABELS: Record<string, string> = {
   suppressed: 'Suppressed', send_failed: 'Send failed', provider_error: 'Provider error',
   retry_pending: 'Retrying', enrichment_failed: 'Enrich failed', verification_failed: 'Verify failed',
 };
+// Premium paper palette: pine progress, amber attention, red failure,
+// blue delivery, slate neutral. Solids only — gradients are banned.
+const PINE = '#26473E';
 const STAGE_COLORS: Record<string, string> = {
-  discovered: '#816cff', enriching: '#a78bfa', enriched: '#22d3ee',
-  verifying: '#2dd4bf', verified: '#34d399', ready_for_outreach: '#4ade80',
-  message_generated: '#a3e635', drafted: '#fbbf24', send_pending: '#fb923c',
-  contacted: '#fb6a8f', sent: '#f472b6', delivered: '#38bdf8', replied: '#38bdf8',
-  converted: '#34d399', bounced: '#f87171', contact_unavailable: '#94a3b8',
-  suppressed: '#64748b', send_failed: '#ef4444', provider_error: '#f97316',
-  retry_pending: '#eab308', enrichment_failed: '#f87171', verification_failed: '#f87171',
+  discovered: '#64748B', enriching: '#8FA3A0', enriched: '#2F7D6B',
+  verifying: '#0E9594', verified: '#1F8A4C', ready_for_outreach: '#4D7C0F',
+  message_generated: '#65A30D', drafted: '#B45309', send_pending: '#C2410C',
+  contacted: '#9D174D', sent: '#BE185D', delivered: '#0284C7', replied: '#1D4ED8',
+  converted: '#15803D', bounced: '#DC2626', contact_unavailable: '#94A3B8',
+  suppressed: '#64748B', send_failed: '#B91C1C', provider_error: '#EA580C',
+  retry_pending: '#CA8A04', enrichment_failed: '#DC2626', verification_failed: '#DC2626',
 };
 
 // One glass tooltip reused by every chart.
@@ -57,14 +62,32 @@ function ChartTip(props: any) {
   );
 }
 
+type FeedItem = { key: number; type: string; lead_id?: string; at: number };
+
+const EVENT_LABELS: Record<string, string> = {
+  enrichment_queued: 'Enrichment queued', enrichment_complete: 'Enrichment finished',
+  verification_queued: 'Verification queued', verification_complete: 'Verification finished',
+  draft_queued: 'Draft queued', draft_generated: 'Draft generated',
+  send_queued: 'Send queued', send_complete: 'Message sent', send_blocked: 'Send blocked',
+  verify_send_queued: 'Verify+send queued', verify_and_send_queued: 'Verify+send queued',
+  verify_send_complete: 'Verify+send finished', lead_updated: 'Lead updated',
+  lead_claimed: 'Lead claimed', lead_assigned: 'Lead assigned',
+  leads_claimed: 'Leads claimed', leads_assigned: 'Leads assigned',
+  leads_imported: 'Leads imported',
+};
+
 const Dashboard: React.FC = () => {
-  const { data, isLoading, error, refetch } = useQuery('dashboard-stats', () => dashboard.stats(), { refetchInterval: 15000 });
-  const { data: creditData } = useQuery('dashboard-credits', () => dashboard.credits(), { refetchInterval: 15000 });
-  const { data: armyStatus } = useQuery('army-status', () => admin.armyStatus(), { refetchInterval: 4000 });
+  const [live, setLive] = React.useState(true);
+  const [feed, setFeed] = React.useState<FeedItem[]>([]);
+  const feedKey = React.useRef(0);
+  const { data, isLoading, error, refetch } = useQuery('dashboard-stats', () => dashboard.stats(), { refetchInterval: live ? 15000 : false });
+  const { data: creditData } = useQuery('dashboard-credits', () => dashboard.credits(), { refetchInterval: live ? 15000 : false });
+  const { data: armyStatus } = useQuery('army-status', () => admin.armyStatus(), { refetchInterval: live ? 4000 : false });
   const user = useAuthStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
   const queryClient = useQueryClient();
-  const { data: runsData } = useQuery('dashboard-runs', () => admin.getRuns(8), { refetchInterval: 15000, enabled: isAdmin });
+  const navigate = useNavigate();
+  const { data: runsData } = useQuery('dashboard-runs', () => admin.getRuns(8), { refetchInterval: live ? 15000 : false, enabled: isAdmin });
 
   const armyMutation = useMutation(() => admin.runArmy(), {
     onSuccess: (d: any) => {
@@ -74,9 +97,14 @@ const Dashboard: React.FC = () => {
   });
 
   useSSE('/sse/token', (event) => {
-    if (isLeadLifecycleEvent(event.type)) {
+    if (!live) return;
+    if (isLeadLifecycleEvent(event.type) || EVENT_LABELS[event.type]) {
       refetch();
       queryClient.invalidateQueries('dashboard-credits');
+      queryClient.invalidateQueries('army-status');
+      feedKey.current += 1;
+      const item = { key: feedKey.current, type: event.type, lead_id: event.lead_id as string | undefined, at: Date.now() };
+      setFeed((f) => [item, ...f].slice(0, 20));
     }
   });
 
@@ -130,40 +158,73 @@ const Dashboard: React.FC = () => {
     name: `${d.channel} · ${d.delivery_status}`,
     value: Number(d.count),
   }));
-  const VERIF_COLORS = ['#34d399', '#fbbf24', '#f87171', '#38bdf8', '#a78bfa', '#94a3b8'];
-  const OUTREACH_COLORS = ['#fb6a8f', '#38bdf8', '#34d399', '#f87171', '#fbbf24', '#94a3b8'];
+  const VERIF_COLORS = ['#1F8A4C', '#B45309', '#DC2626', '#0284C7', '#64748B', '#94A3B8'];
+  const OUTREACH_COLORS = ['#9D174D', '#0284C7', '#1F8A4C', '#DC2626', '#B45309', '#94A3B8'];
 
   return (
     <div className="space-y-phi4">
       {/* ---- hero ---- */}
-      <div className="glow-ring card relative overflow-hidden p-6 sm:p-7">
-        <div className="pointer-events-none absolute inset-0 opacity-40" style={{ background: 'var(--grad-mesh)' }} />
+      <div className="card relative overflow-hidden p-6 sm:p-7">
         <div className="relative flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-muted-foreground">
-              <Radar className={`h-4 w-4 ${armyLive ? 'animate-pulse text-success' : 'text-primary'}`} />
-              Live intelligence
-            </div>
-            <h1 className="shimmer-text text-3xl font-bold tracking-tight sm:text-4xl">
+            <p className="eyebrow mb-2">Live intelligence</p>
+            <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
               Lead Intelligence Command
             </h1>
             <p className="mt-1 max-w-md text-sm text-muted-foreground">
               Autonomous India fresher discovery · HR contact enrichment · outreach drafts.
             </p>
           </div>
-          {isAdmin && (
-            <div className="flex flex-col items-stretch gap-3 sm:items-end">
-              <Button size="lg" onClick={() => armyMutation.mutate()} loading={armyMutation.isLoading} className="btn-glow">
-                <Zap className="h-5 w-5" />
-                {armyMutation.isLoading ? 'Deploying…' : 'Run Full Army'}
+          <div className="flex flex-col items-stretch gap-3 sm:items-end">
+            <div className="flex gap-2">
+              <Button
+                variant="outline" size="lg" onClick={() => setLive((v) => !v)}
+                title={live ? 'Pause live updates' : 'Resume live updates'}
+              >
+                {live ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                {live ? 'Live' : 'Paused'}
               </Button>
-              <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium backdrop-blur transition-colors ${armyLive ? 'border-success/40 bg-success-soft text-success' : 'border-border bg-surface/50 text-muted-foreground'}`}>
-                <Radio className={`h-3.5 w-3.5 ${armyLive ? 'animate-pulse' : ''}`} />
-                {armyLive ? `Army running · ${queued} leads in flight` : 'Idle — ready to deploy'}
-              </div>
+              {isAdmin && (
+                <Button size="lg" onClick={() => armyMutation.mutate()} loading={armyMutation.isLoading}>
+                  <Zap className="h-5 w-5" />
+                  {armyMutation.isLoading ? 'Deploying…' : 'Run Full Army'}
+                </Button>
+              )}
             </div>
-          )}
+            <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium backdrop-blur transition-colors ${armyLive ? 'border-success/40 bg-success-soft text-success' : 'border-border bg-surface/50 text-muted-foreground'}`}>
+              <Radio className={`h-3.5 w-3.5 ${armyLive ? 'animate-pulse' : ''}`} />
+              {armyLive ? `Army running · ${queued} leads in flight` : 'Idle — ready to deploy'}
+            </div>
+          </div>
         </div>
+      </div>
+
+      {/* ---- live activity ---- */}
+      <div className="card flex items-center gap-3 overflow-hidden px-4 py-3">
+        <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${live ? 'border-success/40 bg-success-soft text-success' : 'border-border text-muted-foreground'}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${live ? 'animate-pulse bg-success' : 'bg-muted-foreground'}`} />
+          {live ? 'Live' : 'Paused'}
+        </span>
+        {feed.length === 0 ? (
+          <p className="truncate text-[13px] text-muted-foreground">
+            {live ? 'Listening for pipeline events — enrich, verify or draft a lead and watch it land here.' : 'Live updates paused — resume to stream pipeline events.'}
+          </p>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+            {feed.slice(0, 6).map((item) => (
+              <motion.span
+                key={item.key}
+                initial={{ opacity: 0, x: 12 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[12px] text-foreground"
+                title={item.lead_id ? `Lead ${item.lead_id}` : item.type}
+              >
+                <Zap className="h-3 w-3 text-primary" />
+                {EVENT_LABELS[item.type] || item.type}
+              </motion.span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ---- stats ---- */}
@@ -185,17 +246,11 @@ const Dashboard: React.FC = () => {
             <div className="h-[190px] w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={trendData} margin={{ left: -12, right: 12, top: 4 }}>
-                  <defs>
-                    <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#816cff" stopOpacity={0.45} />
-                      <stop offset="100%" stopColor="#816cff" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
                   <XAxis dataKey="day" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                  <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} width={36} />
+                  <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} width={40} domain={[0, 'dataMax']} tickCount={5} />
                   <Tooltip content={<ChartTip />} cursor={{ stroke: 'hsl(var(--primary))', strokeOpacity: 0.4 }} />
-                  <Area type="monotone" dataKey="discovered" name="Discovered" stroke="#816cff" strokeWidth={2.5} fill="url(#trendGrad)" />
+                  <Area type="monotone" dataKey="discovered" name="Discovered" stroke={PINE} strokeWidth={2.5} fill={PINE} fillOpacity={0.12} animationDuration={800} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -206,21 +261,28 @@ const Dashboard: React.FC = () => {
       {/* ---- live pipeline ---- */}
       <div className="grid grid-cols-1 gap-phi3 xl:grid-cols-3">
         <Card className="xl:col-span-2">
-          <CardHeader><CardTitle className="flex items-center gap-2"><Activity className="h-5 w-5 text-primary" />Pipeline Funnel</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="flex items-center gap-2"><Activity className="h-5 w-5 text-primary" />Pipeline Funnel <span className="ml-auto text-xs font-normal text-muted-foreground">Click a bar to open those leads</span></CardTitle></CardHeader>
           <CardContent className="space-y-5">
             {funnelData.length === 0 ? (
               <EmptyState icon={BarChart3} title="No pipeline data yet" description="Deploy the army to start discovering India fresher leads." />
             ) : (
               <>
-                <div className="h-[180px] w-full">
+                <div className="h-[180px] w-full cursor-pointer">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={funnelData} layout="vertical" margin={{ left: 8, right: 16 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
                       <XAxis type="number" hide />
                       <YAxis type="category" dataKey="stage" width={96} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                       <Tooltip content={<ChartTip />} cursor={{ fill: 'hsl(var(--accent) / 0.4)' }} />
-                      <Bar dataKey="count" name="Leads" radius={[0, 8, 8, 0]}>
-                        {funnelData.map((d) => <Cell key={d.full} fill={STAGE_COLORS[d.full] || 'url(#barGrad)'} />)}
+                      <Bar
+                        dataKey="count" name="Leads" radius={[0, 8, 8, 0]}
+                        animationDuration={700}
+                        onClick={(bar: any) => {
+                          const stage = bar?.payload?.full;
+                          if (stage) navigate(`/leads?pipeline_stage=${encodeURIComponent(stage)}`);
+                        }}
+                      >
+                        {funnelData.map((d) => <Cell key={d.full} fill={STAGE_COLORS[d.full] || PINE} />)}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -256,14 +318,14 @@ const Dashboard: React.FC = () => {
               <div className="relative h-28 w-28 shrink-0">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie data={[{ v: coverage }, { v: 100 - coverage }]} dataKey="v" innerRadius={38} outerRadius={52} startAngle={90} endAngle={-270} stroke="none" cornerRadius={6}>
-                      <Cell fill="url(#ringGrad)" />
+                    <Pie data={[{ v: coverage }, { v: 100 - coverage }]} dataKey="v" innerRadius={38} outerRadius={52} startAngle={90} endAngle={-270} stroke="none" cornerRadius={6} animationDuration={800}>
+                      <Cell fill={PINE} />
                       <Cell fill="hsl(var(--muted))" />
                     </Pie>
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-gradient text-2xl font-bold tabular-nums">{coverage}%</span>
+                  <span className="text-ink-strong text-2xl font-bold tabular-nums">{coverage}%</span>
                 </div>
               </div>
               <div className="text-[13px] text-muted-foreground">
@@ -284,7 +346,7 @@ const Dashboard: React.FC = () => {
               ].map((row) => (
                 <div key={row.k} className={`rounded-xl border p-3 transition-colors ${row.v > 0 ? 'border-primary/40 bg-primary/10' : 'border-border bg-muted/40'}`}>
                   <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground"><row.icon className="h-3.5 w-3.5" />{row.k}</div>
-                  <p className={`text-xl font-semibold tabular-nums ${row.v > 0 ? 'text-gradient animate-pulse' : 'text-foreground'}`}>{row.v < 0 ? '—' : row.v}</p>
+                  <p className={`text-xl font-semibold tabular-nums ${row.v > 0 ? 'text-ink-strong' : 'text-foreground'}`}>{row.v < 0 ? '—' : row.v}</p>
                 </div>
               ))}
             </CardContent>

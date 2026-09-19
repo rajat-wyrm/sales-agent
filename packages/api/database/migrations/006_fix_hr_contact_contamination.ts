@@ -80,15 +80,27 @@ export const up = async (pgm: MigrationContext) => {
   //    exempt -- identified by the retained_anonymised_at marker it stamps. COALESCE is
   //    required: with a NULL provenance the `?` operator yields NULL, and a
   //    CHECK that evaluates to NULL passes, so the guard would not fire.
+  //    (Guarded ADD: the consolidated declarative schema/tables/tables.sql now
+  //    includes this same constraint, so on a schema-fresh DB it already exists
+  //    and an unconditional ADD CONSTRAINT fails with 42710 during a
+  //    fresh-DB replay of the whole migration chain.)
   await pgm.sql(`
-    ALTER TABLE hr_contacts
-      ADD CONSTRAINT hr_contacts_has_locator CHECK (
-        NULLIF(linkedin_url, '') IS NOT NULL
-        OR NULLIF(personal_email, '') IS NOT NULL
-        OR NULLIF(personal_mobile, '') IS NOT NULL
-        OR COALESCE(extraction_provenance ? 'retained_anonymised_at', false)
-      ) NOT VALID
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'hr_contacts_has_locator'
+           AND conrelid = 'hr_contacts'::regclass
+      ) THEN
+        ALTER TABLE hr_contacts ADD CONSTRAINT hr_contacts_has_locator CHECK (
+          NULLIF(linkedin_url, '') IS NOT NULL
+          OR NULLIF(personal_email, '') IS NOT NULL
+          OR NULLIF(personal_mobile, '') IS NOT NULL
+          OR COALESCE(extraction_provenance ? 'retained_anonymised_at', false)
+        ) NOT VALID;
+      END IF;
+    END $$;
   `);
+  // Idempotent either way: validating an already-VALID constraint is a no-op.
   await pgm.sql(`ALTER TABLE hr_contacts VALIDATE CONSTRAINT hr_contacts_has_locator`);
 
   // 6. Email has no global uniqueness (a shared inbox legitimately appears at

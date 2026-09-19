@@ -92,7 +92,7 @@ const Header = ({ onMenuClick }: { onMenuClick?: () => void }) => {
       </button>
 
       <div className="min-w-0">
-        <p className="text-gradient text-[15px] font-semibold tracking-tight sm:text-base">
+        <p className="text-ink-strong text-[15px] font-semibold tracking-tight sm:text-base">
           {title}
         </p>
         <p className="hidden text-xs text-muted-foreground sm:block">

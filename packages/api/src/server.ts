@@ -59,7 +59,21 @@ const server = async () => {
   });
   app.setErrorHandler(errorHandler);
 
-  app.get('/metrics', async (_req, reply) => {
+  // /metrics is fail-closed. It previously answered 200 to anyone who could
+  // reach the API port, and the payload enumerates every route, status code and
+  // latency bucket -- a ready-made reconnaissance map of the deployment. With no
+  // METRICS_TOKEN set the endpoint refuses rather than silently exposing itself,
+  // so a missing env var shows up as a broken scrape, not a leak.
+  app.get('/metrics', async (req, reply) => {
+    const expected = env.METRICS_TOKEN;
+    if (!expected) {
+      req.log.warn('GET /metrics refused: METRICS_TOKEN is not configured');
+      return reply.status(503).send({ error: 'Metrics endpoint is not configured' });
+    }
+    const presented = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (presented !== expected) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
     reply.header('Content-Type', 'text/plain; version=0.0.4');
     return getPrometheusMetrics();
   });

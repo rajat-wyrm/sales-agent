@@ -97,6 +97,10 @@ const UNAVAILABLE_PROVIDERS: Record<string, string> = {
 const API_KEY_FIELDS: { name: string; label: string; placeholder?: string }[] = [
   { name: 'contactout', label: 'ContactOut API Key', placeholder: 'Auto-fill or leave blank' },
   { name: 'snovio', label: 'Snov.io API Key' },
+  // Snov.io authenticates with a key + secret pair; the secret was renderable
+  // nowhere and therefore unsettable from the UI, so the Snov.io tier could never
+  // be configured here.
+  { name: 'snovio_secret', label: 'Snov.io API Secret' },
   { name: 'gemini', label: 'Gemini API Key' },
   { name: 'whatsapp', label: 'WhatsApp Session (Base64 JSON)', placeholder: 'whatsapp-web.js session data' },
   { name: 'reacher', label: 'Reacher API Key' },
@@ -224,19 +228,26 @@ const Settings: React.FC = () => {
     const form = document.getElementById('api-keys-form') as HTMLFormElement;
     const formData = new FormData(form);
     const keys: Record<string, string> = {};
-    ['contactout', 'snovio', 'gemini', 'whatsapp', 'resend', 'brevo'].forEach((key) => {
-      const val = (formData.get(key) as string) || '';
+    // Submit EVERY rendered field. This used to iterate a hardcoded six-name list
+    // (contactout/snovio/gemini/whatsapp/resend/brevo) while the form rendered
+    // fifteen inputs, so the Adzuna, Jooble, Twitter, Reddit and Telegram
+    // credentials a user typed were dropped on the floor -- accepted by the form,
+    // never sent. Deriving the list from API_KEY_FIELDS keeps the two in step.
+    API_KEY_FIELDS.forEach((field) => {
+      const val = (formData.get(field.name) as string) || '';
       const trimmed = val.trim();
       // NEVER submit masked placeholders back: the server returns keys masked
       // (••••abcd) and saving one would overwrite the real key with the mask.
-      if (trimmed && !trimmed.startsWith('•')) keys[key] = trimmed;
+      if (trimmed && !trimmed.startsWith('•')) keys[field.name] = trimmed;
     });
     if (Object.keys(keys).length === 0) {
       toast({ title: 'Nothing to save', description: 'Enter a new key value first — masked placeholders are never re-submitted.', variant: 'error' });
       return;
     }
+    // The dirty flag is cleared by the mutation's onSuccess/onError, not here:
+    // clearing it optimistically released the unsaved-changes warning even when
+    // the save failed.
     saveMutation.mutate(keys);
-    setApiKeysDirty(false);
   };
 
   const handleSaveSources = () => {

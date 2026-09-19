@@ -11,12 +11,17 @@ jest.mock('@/hooks/useSSE', () => ({
 }));
 
 jest.mock('@/stores/auth', () => ({
-  useAuthStore: jest.fn(() => ({
+  useAuthStore: Object.assign(jest.fn(() => ({
     user: { id: '1', email: 'test@test.com', role: 'admin' },
     isAuthenticated: true,
     logout: jest.fn(),
     token: 'fake-token',
-  })),
+  })), {
+    getState: () => ({
+      user: { id: '1', email: 'test@test.com', role: 'admin' },
+      isAuthenticated: true,
+    }),
+  }),
 }));
 
 jest.mock('@/lib/api', () => ({
@@ -30,12 +35,19 @@ jest.mock('@/lib/api', () => ({
     bulkDraft: jest.fn(),
     setDoNotContact: jest.fn(),
     assign: jest.fn(),
+    claim: jest.fn(),
+    ownership: jest.fn(),
+    my: jest.fn(),
+    mine: jest.fn(),
+    enrichment: jest.fn(),
+    enrichmentJob: jest.fn(),
     getDuplicates: jest.fn(),
     mergeDuplicate: jest.fn(),
   },
   admin: {
     getRuns: jest.fn(),
     getUsers: jest.fn(),
+    teamMembers: jest.fn().mockResolvedValue({ members: [] }),
     sourceHealth: jest.fn(),
     armyStatus: jest.fn(),
   },

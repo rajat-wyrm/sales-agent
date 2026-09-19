@@ -16,6 +16,7 @@ import crypto from 'crypto';
 export const LEAD_SELECT_SQL = `
         l.id, l.lead_score, l.score_band, l.pipeline_stage, l.data_quality,
         l.email_status, l.whatsapp_status, l.do_not_contact, l.assigned_to,
+        l.claimed_by, l.claimed_at,
         l.legal_basis, l.processing_purpose, l.provenance, l.possible_duplicate_of,
         l.created_at, l.updated_at,
         jp.source_site, jp.title AS job_title,
@@ -30,13 +31,20 @@ export const LEAD_SELECT_SQL = `
         c.name as company_name, c.domain as company_domain,
         c.industry, c.size_estimate, c.about as about_company,
         c.website_url, c.default_email, c.default_phone,
+        c.employee_count, c.revenue, c.founded_year,
+        c.city as company_city, c.country as company_country,
         hc.full_name as hr_name, hc.linkedin_url as hr_linkedin_url,
         hc.personal_email as hr_email, hc.personal_mobile as hr_mobile,
+        hc.job_title as hr_title, hc.department as hr_department,
+        hc.seniority as hr_seniority, hc.location as hr_location,
+        hc.emails as hr_emails, hc.phones as hr_phones,
+        hc.email_verified as hr_email_verified,
         hc.confidence_score as hr_confidence, hc.contact_source,
         hc.contact_method, hc.contact_url,
         -- assigned_to alone is a bare UUID; without the owner's email the column is
         -- unreadable in the UI and meaningless in an exported spreadsheet.
-        au.email as assigned_to_email`.trim();
+        au.email as assigned_to_email,
+        cu.email as claimed_by_email`.trim();
 
 export type ExportType = 'Number' | 'DateTime' | 'Url' | 'Bool';
 
@@ -94,6 +102,13 @@ export const LEAD_EXPORT_COLUMNS: ExportColumn[] = [
 
   // HR contact
   { header: 'HR Name', field: 'hr_name', group: 'HR contact', get: (r) => r.hr_name, width: 22 },
+  { header: 'HR Title', field: 'hr_title', group: 'HR contact', get: (r) => r.hr_title, width: 24 },
+  { header: 'HR Department', field: 'hr_department', group: 'HR contact', get: (r) => r.hr_department, width: 18 },
+  { header: 'HR Seniority', field: 'hr_seniority', group: 'HR contact', get: (r) => r.hr_seniority, width: 14 },
+  { header: 'HR Location', field: 'hr_location', group: 'HR contact', get: (r) => r.hr_location, width: 18 },
+  { header: 'HR Extra Emails', field: 'hr_emails', group: 'HR contact', get: (r) => Array.isArray(r.hr_emails) ? r.hr_emails.join('; ') : r.hr_emails, width: 30 },
+  { header: 'HR Extra Phones', field: 'hr_phones', group: 'HR contact', get: (r) => Array.isArray(r.hr_phones) ? r.hr_phones.join('; ') : r.hr_phones, width: 22 },
+  { header: 'HR Email Verified', field: 'hr_email_verified', group: 'HR contact', get: (r) => (r.hr_email_verified ? 'YES' : 'no'), width: 16 },
   { header: 'HR Email', field: 'hr_email', group: 'HR contact', get: (r) => r.hr_email, width: 30 },
   { header: 'HR Mobile', field: 'hr_mobile', group: 'HR contact', get: (r) => r.hr_mobile, width: 16 },
   { header: 'HR LinkedIn', field: 'hr_linkedin_url', group: 'HR contact', get: (r) => r.hr_linkedin_url, type: 'Url', width: 34 },
@@ -106,6 +121,9 @@ export const LEAD_EXPORT_COLUMNS: ExportColumn[] = [
 
   // Company
   { header: 'Company', field: 'company_name', group: 'Company', get: (r) => r.company_name, width: 28 },
+  { header: 'Employees', field: 'employee_count', group: 'Company', get: (r) => r.employee_count, type: 'Number', width: 12 },
+  { header: 'Revenue', field: 'revenue', group: 'Company', get: (r) => r.revenue, width: 18 },
+  { header: 'Founded', field: 'founded_year', group: 'Company', get: (r) => r.founded_year, type: 'Number', width: 10 },
   { header: 'Domain', field: 'company_domain', group: 'Company', get: (r) => r.company_domain, width: 24 },
   { header: 'Industry', field: 'industry', group: 'Company', get: (r) => r.industry, width: 20 },
   { header: 'Company Size', field: 'size_estimate', group: 'Company', get: (r) => r.size_estimate, width: 16 },

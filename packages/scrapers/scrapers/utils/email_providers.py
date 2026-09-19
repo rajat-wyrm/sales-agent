@@ -100,12 +100,27 @@ async def enrich_via_apollo_io(full_name: str, company_domain: str,
                     continue
                 verified = p.get("email_verification") == "verified"
                 conf = 90 if verified else 60
+                phones = [ph.get("raw_number", "") for ph in (p.get("phone_numbers") or [])
+                          if ph.get("raw_number")]
+                org = p.get("organization") or {}
                 return {
                     "hr_email": email,
                     "hr_name": p.get("name", full_name),
                     "hr_linkedin_url": p.get("linkedin_url", ""),
-                    "hr_mobile": (p.get("phone_numbers") or [{}])[0].get("raw_number", "")
-                        if p.get("phone_numbers") else "",
+                    "hr_mobile": phones[0] if phones else "",
+                    "extra_phones": phones[1:],
+                    "person_title": p.get("title", ""),
+                    "person_department": (p.get("departments") or [""])[0],
+                    "person_seniority": p.get("seniority", ""),
+                    "person_location": p.get("city", ""),
+                    "email_verified": verified,
+                    "company_name_guess": org.get("name", ""),
+                    "company_employee_count": org.get("estimated_num_employees", 0) or None,
+                    "company_revenue": org.get("annual_revenue_printed", "") or "",
+                    "company_founded": org.get("founded_year", 0) or None,
+                    "company_industry": org.get("industry", ""),
+                    "company_linkedin_url": org.get("linkedin_url", ""),
+                    "company_tech": org.get("technology_names") or [],
                     "confidence": conf,
                     "source": "apollo_io",
                     "verified": verified,
@@ -229,6 +244,11 @@ async def enrich_via_lusha(full_name: str, company_domain: str,
                     "hr_mobile": phone,
                     "hr_linkedin_url": person.get("linkedin", {}).get("publicUrl", "")
                         if isinstance(person.get("linkedin"), dict) else "",
+                    "person_title": person.get("jobTitle", "") or person.get("title", ""),
+                    "person_department": person.get("department", ""),
+                    "person_seniority": person.get("seniority", ""),
+                    "email_verified": bool(person.get("emailData", {}).get("isVerified"))
+                        if person.get("emailData") else False,
                     "confidence": 75 if email else 50,
                     "source": "lusha",
                     "verified": bool(person.get("emailData", {}).get("isVerified"))
@@ -271,6 +291,9 @@ async def enrich_via_rocketreach(full_name: str, company_domain: str,
                 "hr_name": profile.get("name", full_name),
                 "hr_linkedin_url": profile.get("linkedin_url", ""),
                 "hr_mobile": profile.get("phone", ""),
+                "person_title": profile.get("current_title", ""),
+                "person_location": profile.get("location", "") or profile.get("city", ""),
+                "email_verified": profile.get("email_status") == "verified",
                 "confidence": 70,
                 "source": "rocketreach",
                 "verified": profile.get("email_status") == "verified",

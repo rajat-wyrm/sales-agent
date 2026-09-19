@@ -56,6 +56,44 @@ const envSchema = z.object({
   CIRCUIT_BREAKER_COOLDOWN_MINUTES: z.string().default('120').transform(Number),
   ADMIN_EMAIL: z.string().optional(),
   ADMIN_PASSWORD: z.string().optional(),
+  // Public self-registration is OFF unless an operator opts in. An open /register
+  // let anyone create a `sales_rep` account on an internet-reachable deployment
+  // and immediately read lead PII. Default-deny is the only safe default; set
+  // ALLOW_SELF_REGISTRATION=true for a single-tenant/dev instance.
+  ALLOW_SELF_REGISTRATION: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  // Shared secret for scraping /metrics. Empty means the endpoint is refused
+  // (fail-closed) rather than publicly exposed.
+  METRICS_TOKEN: z.string().optional(),
+  // Credit budgets surfaced by /dashboard/credits. Overridable per deployment
+  // instead of being hardcoded to 1000.
+  CREDIT_LIMIT_DEFAULT: z.string().default('1000').transform(Number),
+  // JSON object of {provider: limit} overrides, e.g. {"snovio":500}.
+  CREDIT_LIMITS: z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (!v) return {} as Record<string, number>;
+      try {
+        const parsed = JSON.parse(v) as Record<string, unknown>;
+        return Object.fromEntries(
+          Object.entries(parsed)
+            .map(([k, n]) => [k, Number(n)] as const)
+            .filter(([, n]) => Number.isFinite(n) && n > 0),
+        );
+      } catch {
+        return {} as Record<string, number>;
+      }
+    }),
+  // Session cookies carry the refresh token. Mark them Secure only when the
+  // deployment actually terminates TLS, otherwise the browser drops the cookie
+  // and every refresh silently logs the user out.
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 type Env = z.infer<typeof envSchema>;

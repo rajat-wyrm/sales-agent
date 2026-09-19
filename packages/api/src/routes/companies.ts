@@ -37,10 +37,18 @@ export const companiesRoutes: FastifyPluginAsync = async (fastify) => {
 
     const { page, limit, search } = parseResult.data;
     const offset = (page - 1) * limit;
+    const coViewer = req.user as { id: string; role: string } | undefined;
 
     const conditions: string[] = [];
     const values: unknown[] = [];
     let paramIdx = 1;
+
+    // RBAC: sales_rep sees only companies tied to leads they own.
+    if (coViewer?.role === 'sales_rep') {
+      conditions.push(`EXISTS (SELECT 1 FROM leads l WHERE l.company_id = c.id AND (l.assigned_to = $${paramIdx} OR l.claimed_by = $${paramIdx}))`);
+      values.push(coViewer.id);
+      paramIdx++;
+    }
 
     if (search) {
       conditions.push(`(c.name ILIKE $${paramIdx} OR c.domain ILIKE $${paramIdx})`);
@@ -82,14 +90,15 @@ export const companiesRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const { id } = parseResult.data;
     const sql = getDB();
+    const coDetailViewer = req.user as { id: string; role: string } | undefined;
 
     const company = await sql.unsafe(
       `SELECT c.*, COUNT(l.id) as lead_count
        FROM companies c
        LEFT JOIN leads l ON c.id = l.company_id
-       WHERE c.id = $1
+       WHERE c.id = $1${coDetailViewer?.role === 'sales_rep' ? ` AND EXISTS (SELECT 1 FROM leads ol WHERE ol.company_id = c.id AND (ol.assigned_to = $2 OR ol.claimed_by = $2))` : ''}
        GROUP BY c.id`,
-      [id],
+      (coDetailViewer?.role === 'sales_rep' ? [id, coDetailViewer.id] : [id]) as any,
     );
 
     if (!company || company.length === 0) {

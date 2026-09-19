@@ -18,12 +18,26 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     DELETE FROM companies
      WHERE trim(coalesce(name, '')) = '' AND trim(coalesce(domain, '')) = ''
   `);
+  //    ALTER TABLE companies
+  //      ADD CONSTRAINT companies_name_not_blank CHECK (trim(name) <> '')
+  //    Guarded ADD: the consolidated declarative schema
+  //    (schema/constraints/constraints.sql) now declares this same constraint,
+  //    so on a schema-fresh DB it already exists and the unconditional ADD
+  //    fails with 42710 during a fresh-DB replay of the whole chain.
   await pgm.db.query(`
-    ALTER TABLE companies
-      ADD CONSTRAINT companies_name_not_blank CHECK (trim(name) <> '')
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'companies_name_not_blank'
+           AND conrelid = 'companies'::regclass
+      ) THEN
+        ALTER TABLE companies
+          ADD CONSTRAINT companies_name_not_blank CHECK (trim(name) <> '');
+      END IF;
+    END $$;
   `);
 }
 
 export async function down(pgm: MigrationBuilder): Promise<void> {
-  await pgm.db.query(`ALTER TABLE companies DROP CONSTRAINT companies_name_not_blank`);
+  await pgm.db.query(`ALTER TABLE companies DROP CONSTRAINT IF EXISTS companies_name_not_blank`);
 }

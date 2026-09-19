@@ -13,6 +13,7 @@ import Register from '@/pages/Register';
 // and heavier routes stream in on demand.
 const Dashboard = lazy(() => import('@/pages/Dashboard'));
 const Leads = lazy(() => import('@/pages/Leads'));
+const MyLeads = lazy(() => import('@/pages/MyLeads'));
 const LeadDetail = lazy(() => import('@/pages/LeadDetail'));
 const Companies = lazy(() => import('@/pages/Companies'));
 const Contacts = lazy(() => import('@/pages/Contacts'));
@@ -30,11 +31,19 @@ function RouteFallback() {
 }
 
 function App() {
-  const { isAuthenticated, user, init } = useAuthStore();
+  const { isAuthenticated, user, init, ready } = useAuthStore();
 
   React.useEffect(() => {
-    init();
+    void init();
   }, []);
+
+  // Nothing durable is stored client-side any more, so "am I signed in?" can only
+  // be answered by the server via the refresh cookie. Gate the router on that
+  // probe finishing; without it a reload renders the login page for a moment even
+  // though the session is still valid.
+  if (!ready) {
+    return <RouteFallback />;
+  }
 
   if (!isAuthenticated) {
     return (
@@ -56,6 +65,7 @@ function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="leads" element={<Leads />} />
+            <Route path="my-leads" element={<MyLeads />} />
             <Route path="leads/:id" element={<LeadDetail />} />
             <Route path="companies" element={<Companies />} />
             <Route path="contacts" element={<Contacts />} />

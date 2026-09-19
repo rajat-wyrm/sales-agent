@@ -1,3 +1,20 @@
+-- functions/functions.sql — single source of truth for FUNCTIONS (fresh-install schema).
+-- Sections below are the former split files, kept in dependency order.
+-- Idempotent: safe to re-run on every boot. Deployed-DB deltas live in database/migrations/.
+
+-- ==================== [010_set_updated_at.sql] ====================
+-- Concern: FUNCTIONS.
+-- Canonical trigger helper: stamps updated_at on every row modification so
+-- freshness is guaranteed at the storage layer, never relying on callers to
+-- remember to set it (a recurring source of stale "last touched" data).
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ==================== [020_leads_stage_transition.sql] ====================
 -- Legal lifecycle transitions. Same semantics as src/utils/lifecycle.ts (keep in sync).
 --
 -- Design: stages are PROGRESS markers, and writers (workers, webhooks, API) jump

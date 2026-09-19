@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { Logo } from '@/components/Logo';
-import { Radar, Sparkles, Zap, Globe2 } from 'lucide-react';
+import { Sparkles, Zap, Globe2 } from 'lucide-react';
 
 const FEATURES = [
   { icon: Globe2, title: 'Every India source', body: 'Naukri · Internshala · Apna · Cutshort · ATS boards + 30 more, run in parallel.' },
@@ -13,18 +13,12 @@ const FEATURES = [
 export function AuthShell({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return (
     <div className="relative flex min-h-screen overflow-hidden bg-background">
-      <div className="relative hidden w-1/2 flex-col justify-between overflow-hidden border-r border-border p-12 lg:flex">
-        <div className="pointer-events-none absolute inset-0" style={{ background: 'var(--grad-mesh)' }} />
-        <motion.div className="pointer-events-none absolute -left-24 top-1/3 h-96 w-96 rounded-full bg-primary/25 blur-[120px]" animate={{ y: [0, -30, 0], opacity: [0.6, 0.9, 0.6] }} transition={{ duration: 10, repeat: Infinity, ease: 'easeInOut' }} />
-        <motion.div className="pointer-events-none absolute right-0 top-10 h-72 w-72 rounded-full bg-info/20 blur-[100px]" animate={{ y: [0, 40, 0] }} transition={{ duration: 12, repeat: Infinity, ease: 'easeInOut' }} />
-
+      <div className="relative hidden w-1/2 flex-col justify-between overflow-hidden border-r border-border bg-sage-soft/40 p-12 lg:flex">
         <div className="relative z-10"><Logo /></div>
         <div className="relative z-10 max-w-md">
-          <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border/60 bg-surface/40 px-3 py-1 text-xs font-medium text-muted-foreground backdrop-blur">
-            <Radar className="h-3.5 w-3.5 animate-pulse text-success" /> Autonomous lead intelligence
-          </div>
+          <p className="eyebrow mb-4">Autonomous lead intelligence</p>
           <h1 className="text-4xl font-bold leading-[1.1] tracking-tight">
-            Find every fresher job in India<span className="text-gradient"> and the HR behind it.</span>
+            Find every fresher job in India and the HR behind it.
           </h1>
           <p className="mt-4 text-[15px] leading-relaxed text-muted-foreground">
             Scrape → enrich → verify → draft, on autopilot. Contact enrichment with an army of free + paid fallbacks, so a lead never comes back empty.
@@ -48,7 +42,7 @@ export function AuthShell({ title, subtitle, children }: { title: string; subtit
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h2>
             <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
           </div>
-          <div className="glow-ring card p-6 sm:p-7">{children}</div>
+          <div className="card p-6 sm:p-7">{children}</div>
         </motion.div>
       </div>
     </div>

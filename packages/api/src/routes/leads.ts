@@ -1,6 +1,7 @@
 import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { getDB } from '../utils/db';
+import { likeContains } from '../utils/sql';
 import { getRedis } from '../utils/redis';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
@@ -53,6 +54,18 @@ const paginationSchema = z.object({
     z.boolean().optional(),
   ),
   filter: z.string().optional(),
+  mine: z.preprocess(
+    (v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'boolean') return v;
+      const s = String(v).trim().toLowerCase();
+      if (['true', '1', 'yes', 'mine'].includes(s)) return true;
+      if (['false', '0', 'no'].includes(s)) return false;
+      return v;
+    },
+    z.boolean().optional(),
+  ),
+  ownership: z.enum(['unclaimed', 'claimed', 'assigned', 'mine']).optional(),
 });
 
 const leadIdSchema = z.object({
@@ -88,12 +101,32 @@ function buildLeadFilters(q: any, user: { id: string; role: string }) {
    const values: unknown[] = [];
    let paramIdx = 1;
 
-   // RBAC: sales_rep sees only assigned leads, admin sees all
-   if (user.role === 'sales_rep') {
-     conditions.push(`l.assigned_to = $${paramIdx}`);
-     values.push(user.id);
-     paramIdx++;
-   }
+    // RBAC: sales_rep sees only owned leads (claimed OR assigned), admin sees all.
+    // Ownership is the source of truth; claimed_by added alongside assigned_to.
+    // Exception: the `unclaimed` filter is the claim pool — every member must see
+    // it, or Claim is unreachable. Unclaimed rows have no owner to leak.
+    if (user.role === 'sales_rep' && q.ownership !== 'unclaimed') {
+      conditions.push(`(l.assigned_to = $${paramIdx} OR l.claimed_by = $${paramIdx})`);
+      values.push(user.id);
+      paramIdx++;
+    }
+    // ?mine=true scopes to current user regardless of role (My Leads page).
+    if (q.mine === true) {
+      conditions.push(`(l.assigned_to = $${paramIdx} OR l.claimed_by = $${paramIdx})`);
+      values.push(user.id);
+      paramIdx++;
+    }
+    if (q.ownership === 'mine') {
+      conditions.push(`(l.assigned_to = $${paramIdx} OR l.claimed_by = $${paramIdx})`);
+      values.push(user.id);
+      paramIdx++;
+    } else if (q.ownership === 'unclaimed') {
+      conditions.push(`(l.claimed_by IS NULL AND l.assigned_to IS NULL)`);
+    } else if (q.ownership === 'claimed') {
+      conditions.push(`(l.claimed_by IS NOT NULL)`);
+    } else if (q.ownership === 'assigned') {
+      conditions.push(`(l.assigned_to IS NOT NULL)`);
+    }
 
    if (q.score_band) {
      conditions.push(`l.score_band = $${paramIdx}`);
@@ -150,18 +183,18 @@ function buildLeadFilters(q: any, user: { id: string; role: string }) {
      paramIdx++;
    }
    if (q.city) {
-     conditions.push(`jp.city ILIKE $${paramIdx}`);
-     values.push(`%${q.city}%`);
+     conditions.push(`jp.city ILIKE $${paramIdx} ESCAPE '\\'`);
+     values.push(likeContains(q.city));
      paramIdx++;
    }
    if (q.state) {
-     conditions.push(`jp.state ILIKE $${paramIdx}`);
-     values.push(`%${q.state}%`);
+     conditions.push(`jp.state ILIKE $${paramIdx} ESCAPE '\\'`);
+     values.push(likeContains(q.state));
      paramIdx++;
    }
    if (q.department) {
-     conditions.push(`jp.department ILIKE $${paramIdx}`);
-     values.push(`%${q.department}%`);
+     conditions.push(`jp.department ILIKE $${paramIdx} ESCAPE '\\'`);
+     values.push(likeContains(q.department));
      paramIdx++;
    }
    if (q.salary_min != null) {
@@ -177,18 +210,62 @@ function buildLeadFilters(q: any, user: { id: string; role: string }) {
      conditions.push(`(jp.salary_min IS NULL AND COALESCE(jp.salary_range, '') = '')`);
    }
    if (q.filter) {
-     conditions.push(`(c.name ILIKE $${paramIdx} OR c.domain ILIKE $${paramIdx} OR jp.title ILIKE $${paramIdx})`);
-     values.push(`%${q.filter}%`);
+     conditions.push(`(c.name ILIKE $${paramIdx} ESCAPE '\\' OR c.domain ILIKE $${paramIdx} ESCAPE '\\' OR jp.title ILIKE $${paramIdx} ESCAPE '\\')`);
+     values.push(likeContains(q.filter));
      paramIdx++;
    }
-  return { conditions, values, paramIdx };
+   return { conditions, values, paramIdx };
+}
+
+/**
+ * Per-lead ownership: admin sees all; sales_rep only leads they own
+ * (assigned_to OR claimed_by). Every mutating/reading single-lead route must
+ * consult this server-side — frontend hiding is not authorization.
+ */
+async function ownsLead(
+  sql: { unsafe: (q: string, p?: unknown) => Promise<unknown> },
+  leadId: string,
+  user: { id: string; role: string },
+): Promise<boolean> {
+  if (user.role === 'admin') {
+    const rows = (await sql.unsafe(`SELECT 1 FROM leads WHERE id = $1`, [leadId])) as unknown[];
+    return rows.length > 0;
+  }
+  const rows = (await sql.unsafe(
+    `SELECT 1 FROM leads WHERE id = $1 AND (assigned_to = $2 OR claimed_by = $2)`,
+    [leadId, user.id],
+  )) as unknown[];
+  return rows.length > 0;
+}
+
+/**
+ * Read access: owned leads plus the unclaimed pool (so members can inspect
+ * a lead before claiming it). Mutations stay owner-only via ownsLead.
+ */
+async function canReadLead(
+  sql: { unsafe: (q: string, p?: unknown) => Promise<unknown> },
+  leadId: string,
+  user: { id: string; role: string },
+): Promise<boolean> {
+  if (user.role === 'admin') {
+    const rows = (await sql.unsafe(`SELECT 1 FROM leads WHERE id = $1`, [leadId])) as unknown[];
+    return rows.length > 0;
+  }
+  const rows = (await sql.unsafe(
+    `SELECT 1 FROM leads WHERE id = $1 AND (assigned_to = $2 OR claimed_by = $2
+       OR (claimed_by IS NULL AND assigned_to IS NULL))`,
+    [leadId, user.id],
+  )) as unknown[];
+  return rows.length > 0;
 }
 
 export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
-  fastify.get('/', async (req, reply) => {
-    const parseResult = paginationSchema.safeParse(req.query);
+  async function handleListLeads(req: FastifyRequest, reply: any, forceMine = false) {
+    const rawQuery = { ...((req.query as Record<string, unknown>) || {}) };
+    if (forceMine) rawQuery.mine = 'true';
+    const parseResult = paginationSchema.safeParse(rawQuery);
     if (!parseResult.success) {
       return reply.status(400).send({ error: 'Invalid query parameters', details: parseResult.error.issues });
     }
@@ -267,6 +344,16 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         pages,
       },
     };
+  }
+
+  // My Leads: server-side ownership filter (claimed OR assigned). Registered
+  // before /:id so "my" is never parsed as a UUID.
+  fastify.get('/my', { preValidation: [authorize(['admin', 'sales_rep'])] }, async (req, reply) => {
+    return handleListLeads(req, reply, true);
+  });
+
+  fastify.get('/', async (req, reply) => {
+    return handleListLeads(req, reply, false);
   });
 
   fastify.get<{ Params: { id: string } }>(
@@ -294,17 +381,20 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
           jp.location, jp.city, jp.state, jp.country, jp.location_type,
           jp.employment_type, jp.is_work_from_home, jp.apply_url, jp.posted_at,
           jp.about_job, jp.department, jp.openings_count,
-          jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period
+          jp.salary_min, jp.salary_max, jp.salary_currency, jp.salary_period,
+          cu.email AS claimed_by_email, au.email AS assigned_to_email
         FROM leads l
         JOIN companies c ON l.company_id = c.id
         LEFT JOIN hr_contacts hc ON l.hr_contact_id = hc.id
         JOIN job_postings jp ON l.job_posting_id = jp.id
+        LEFT JOIN users cu ON cu.id = l.claimed_by
+        LEFT JOIN users au ON au.id = l.assigned_to
         WHERE l.id = $1`;
       
       const values: (string | number)[] = [id];
       
       if (user.role === 'sales_rep') {
-        query += ' AND l.assigned_to = $2';
+        query += ' AND (l.assigned_to = $2 OR l.claimed_by = $2 OR (l.claimed_by IS NULL AND l.assigned_to IS NULL))';
         values.push(user.id);
       }
 
@@ -356,12 +446,9 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       const sql = getDB();
       const user = req.user as { id: string; role: string };
 
-      // Authorization: a sales_rep may only see their own assigned leads (server-side).
-      const owned = await sql.unsafe(
-        `SELECT 1 FROM leads WHERE id = $1${user.role === 'sales_rep' ? ' AND assigned_to = $2' : ''}`,
-        (user.role === 'sales_rep' ? [id, user.id] : [id]) as any,
-      );
-      if (!owned || owned.length === 0) return reply.status(404).send({ error: 'Lead not found' });
+      if (!(await canReadLead(sql, id, user))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
 
       const explained = await scoreExplain(sql, id);
       if (!explained) return reply.status(404).send({ error: 'Lead not found' });
@@ -385,40 +472,114 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
       }
       const { provider } = parseResult.data;
+      const prov = provider || 'auto';
+      const me = req.user as { id: string; role: string };
+      const sql = getDB();
+
+      // Ownership guard: reps may only enrich leads they own.
+      if (me.role !== 'admin') {
+        const owned = await sql.unsafe(
+          `SELECT 1 FROM leads WHERE id = $1 AND (assigned_to = $2 OR claimed_by = $2)`,
+          [id, me.id],
+        );
+        if (!owned || owned.length === 0) {
+          return reply.status(404).send({ error: 'Lead not found' });
+        }
+      } else {
+        const exists = await sql.unsafe(`SELECT 1 FROM leads WHERE id = $1`, [id]);
+        if (!exists || exists.length === 0) {
+          return reply.status(404).send({ error: 'Lead not found' });
+        }
+      }
+
+      // Idempotency: a live job for the same lead+provider is reused, never duplicated.
+      // Keyed per lead+provider+day so a double-click returns the same job.
+      const day = new Date().toISOString().slice(0, 10);
+      const idemKey = `${id}:${prov}:${day}`;
+      const live = await sql.unsafe(
+        `SELECT id, status, updated_at FROM enrichment_jobs
+          WHERE idempotency_key = $1 AND status IN ('queued','running') LIMIT 1`,
+        [idemKey],
+      );
+      if (live && live.length > 0) {
+        const row = live[0] as unknown as { id: string; status: string; updated_at: string };
+        const staleMs = Date.now() - new Date(row.updated_at).getTime();
+        // Crash recovery: a worker that died mid-job leaves `running` forever
+        // and idempotency would then block the lead all day. Reclaim stale runs.
+        if (row.status === 'running' && staleMs > 15 * 60 * 1000) {
+          await sql.unsafe(
+            `UPDATE enrichment_jobs SET status = 'queued', current_stage = 'reclaimed',
+               attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
+            [row.id],
+          );
+          await getRedis().lpush(
+            'enrichment_queue:requests',
+            JSON.stringify({
+              lead_id: id, provider: prov, job_id: row.id,
+              requested_by: me.id, requested_at: new Date().toISOString(),
+            }),
+          );
+          await logAuditEvent({
+            user_id: me.id, action: 'enqueue_enrichment', resource_type: 'lead',
+            resource_id: id, details: { provider: prov, job_id: row.id, reclaimed: true },
+          });
+          return reply.status(202).send({
+            message: 'Stale enrichment job reclaimed and requeued',
+            job_id: row.id, lead_id: id, provider: prov, reclaimed: true,
+          });
+        }
+        return reply.status(202).send({
+          message: 'Enrichment already queued',
+          job_id: row.id,
+          lead_id: id,
+          provider: prov,
+          deduped: true,
+        });
+      }
+
+      const jobRows = await sql.unsafe(
+        `INSERT INTO enrichment_jobs (lead_id, provider, status, current_stage, idempotency_key, requested_by)
+         VALUES ($1, $2, 'queued', 'queued', $3, $4)
+         ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = NOW()
+         RETURNING id, status`,
+        [id, prov, idemKey, me.id],
+      );
+      const jobUuid = (jobRows[0] as unknown as { id: string }).id;
 
       const redis = getRedis();
-      const jobId = await redis.lpush(
+      await redis.lpush(
         'enrichment_queue:requests',
         JSON.stringify({
           lead_id: id,
-          provider: provider || 'auto',
-          requested_by: (req.user as { id: string }).id,
+          provider: prov,
+          job_id: jobUuid,
+          requested_by: me.id,
           requested_at: new Date().toISOString(),
         }),
       );
 
       await logAuditEvent({
-        user_id: (req.user as { id: string }).id,
+        user_id: me.id,
         action: 'enqueue_enrichment',
         resource_type: 'lead',
         resource_id: id,
-        details: { provider: provider || 'auto', job_id: String(jobId) },
+        details: { provider: prov, job_id: jobUuid },
       });
 
-      await publishSSE((req.user as { id: string }).id, {
+      await publishSSE(me.id, {
         type: 'enrichment_queued',
         lead_id: id,
-        job_id: String(jobId),
-        provider: provider || 'auto',
+        job_id: jobUuid,
+        provider: prov,
       });
 
       await recomputeLeadScore(getDB(), id);
 
       return reply.status(202).send({
         message: 'Enrichment job queued',
-        job_id: String(jobId),
+        job_id: jobUuid,
         lead_id: id,
-        provider: provider || 'auto',
+        provider: prov,
       });
     },
   );
@@ -434,6 +595,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: 'Invalid lead ID' });
       }
       const { id } = idResult.data;
+      const verifier = req.user as { id: string; role: string };
+      if (!(await ownsLead(getDB(), id, verifier))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
 
       const redis = getRedis();
       const jobId = await redis.lpush(
@@ -485,6 +650,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
       }
       const { channel } = parseResult.data;
+      const drafter = req.user as { id: string; role: string };
+      if (!(await ownsLead(getDB(), id, drafter))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
 
       const redis = getRedis();
       const jobId = await redis.lpush(
@@ -550,6 +719,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       const { subject, body } = bodyResult.data;
 
       const sql = getDB();
+      const me = req.user as { id: string; role: string };
+      if (!(await ownsLead(sql, id, me))) {
+        return reply.status(404).send({ error: 'Draft not found' });
+      }
       const updateFields: string[] = [];
       const values: unknown[] = [];
       let idx = 1;
@@ -604,6 +777,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
       }
       const { channel, draft_id } = parseResult.data;
+      const sender = req.user as { id: string; role: string };
+      if (!(await ownsLead(getDB(), id, sender))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
 
       const sql = getDB();
       const lead = await sql.unsafe(
@@ -734,6 +911,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
 
       // Fail fast on suppressed/unverified leads instead of queueing work that
       // the worker would only reject later. Worker re-checks server-side too.
+      const vsender = req.user as { id: string; role: string };
+      if (!(await ownsLead(getDB(), id, vsender))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
       const sql = getDB();
       const preLead = await sql.unsafe(
         `SELECT l.email_status, l.whatsapp_status, l.do_not_contact,
@@ -810,11 +991,8 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       // delivery status. GET /:id scopes that to the assigned rep; this route did not, so
       // any rep could enumerate UUIDs and read another rep's outreach history.
       const viewer = req.user as { id: string; role: string };
-      if (viewer.role !== 'admin') {
-        const owned = await sql.unsafe(`SELECT 1 FROM leads WHERE id = $1::uuid AND assigned_to = $2::uuid`, [id, viewer.id]);
-        if ((owned as unknown[]).length === 0) {
-          return reply.status(404).send({ error: 'Lead not found' });
-        }
+      if (!(await canReadLead(sql, id, viewer))) {
+        return reply.status(404).send({ error: 'Lead not found' });
       }
 
       const enrichment = await sql.unsafe(
@@ -837,7 +1015,26 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         [id],
       );
 
+      const audits = await sql.unsafe(
+        `SELECT a.action, a.details, a.created_at, u.email AS actor_email
+           FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+          WHERE a.resource_type = 'lead' AND a.resource_id = $1
+            AND a.action IN ('claim_lead','assign_lead','enqueue_enrichment','merge_duplicate','set_do_not_contact','clear_do_not_contact')
+          ORDER BY a.created_at DESC LIMIT 50`,
+        [id],
+      );
+
       const timeline: Array<Record<string, unknown>> = [];
+
+      for (const a of audits) {
+        timeline.push({
+          type: a.action === 'claim_lead' ? 'claimed' : a.action === 'assign_lead' ? 'assigned' : 'activity',
+          action: a.action,
+          details: a.details,
+          actor: a.actor_email,
+          timestamp: a.created_at,
+        });
+      }
 
       for (const e of enrichment) {
         timeline.push({
@@ -907,7 +1104,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       const user = req.user as { id: string; role: string };
       const sql = getDB();
       const permitted = await sql.unsafe(
-        `SELECT id FROM leads WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid)`,
+        `SELECT id FROM leads WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid OR claimed_by = $3::uuid)`,
         [lead_ids, user.role, user.id],
       );
       const allowed = new Set((permitted as unknown as Array<{ id: string }>).map((r) => r.id));
@@ -957,6 +1154,10 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       const { do_not_contact } = parseResult.data;
 
       const sql = getDB();
+      const dncUser = req.user as { id: string; role: string };
+      if (!(await ownsLead(sql, id, dncUser))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
       const result = await sql.unsafe(
         `UPDATE leads SET do_not_contact = $1, updated_at = NOW() WHERE id = $2 RETURNING id, do_not_contact`,
         [do_not_contact, id],
@@ -1023,7 +1224,230 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
         details: { assigned_to: assigned_to || null },
       });
 
+      await publishSSE((req.user as { id: string }).id, {
+        type: 'lead_assigned',
+        lead_id: id,
+        assigned_to: assigned_to || null,
+      });
+
       return { lead: result[0] };
+    },
+  );
+
+  // Atomic claim: only one claimant can win. The UPDATE is the lock — the
+  // WHERE clause fails for every loser, so concurrent clicks cannot double-own.
+  fastify.post<{ Params: { id: string } }>(
+    '/:id/claim',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const idResult = leadIdSchema.safeParse(req.params);
+      if (!idResult.success) {
+        return reply.status(400).send({ error: 'Invalid lead ID' });
+      }
+      const { id } = idResult.data;
+      const me = req.user as { id: string; role: string };
+      const sql = getDB();
+
+      const result = await sql.unsafe(
+        `UPDATE leads SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
+          WHERE id = $2 AND claimed_by IS NULL
+          RETURNING id, claimed_by, claimed_at, assigned_to`,
+        [me.id, id],
+      );
+
+      if (result && result.length > 0) {
+        await logAuditEvent({
+          user_id: me.id,
+          action: 'claim_lead',
+          resource_type: 'lead',
+          resource_id: id,
+          details: { claimed_by: me.id },
+        });
+        await publishSSE(me.id, { type: 'lead_claimed', lead_id: id, claimed_by: me.id });
+        return { lead: result[0] };
+      }
+
+      // Lost the race (or lead missing): distinguish so the UI can say why.
+      const existing = await sql.unsafe(
+        `SELECT l.claimed_by, u.email AS claimed_by_email FROM leads l
+          LEFT JOIN users u ON u.id = l.claimed_by WHERE l.id = $1`,
+        [id],
+      );
+      if (!existing || existing.length === 0) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
+      const row = existing[0] as unknown as { claimed_by: string | null; claimed_by_email: string | null };
+      if (row.claimed_by === me.id) {
+        return { lead: row, already_owned: true };
+      }
+      return reply.status(409).send({
+        error: 'Lead was already claimed by another member.',
+        claimed_by: row.claimed_by,
+        claimed_by_email: row.claimed_by_email,
+      });
+    },
+  );
+
+  // Ownership snapshot for badges: never ambiguous, always server-side.
+  fastify.get<{ Params: { id: string } }>(
+    '/:id/ownership',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const idResult = leadIdSchema.safeParse(req.params);
+      if (!idResult.success) {
+        return reply.status(400).send({ error: 'Invalid lead ID' });
+      }
+      const { id } = idResult.data;
+      const sql = getDB();
+      const ownerViewer = req.user as { id: string; role: string };
+      if (!(await canReadLead(sql, id, ownerViewer))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
+      const rows = await sql.unsafe(
+        `SELECT l.id, l.claimed_by, l.claimed_at, l.assigned_to,
+                cu.email AS claimed_by_email, au.email AS assigned_to_email
+           FROM leads l
+           LEFT JOIN users cu ON cu.id = l.claimed_by
+           LEFT JOIN users au ON au.id = l.assigned_to
+          WHERE l.id = $1`,
+        [id],
+      );
+      if (!rows || rows.length === 0) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
+      return { ownership: rows[0] };
+    },
+  );
+
+  // Latest enrichment job for a lead (poll target for Queued→Running→Completed).
+  fastify.get<{ Params: { id: string } }>(
+    '/:id/enrichment',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const idResult = leadIdSchema.safeParse(req.params);
+      if (!idResult.success) {
+        return reply.status(400).send({ error: 'Invalid lead ID' });
+      }
+      const { id } = idResult.data;
+      const sql = getDB();
+      const enrViewer = req.user as { id: string; role: string };
+      if (!(await canReadLead(sql, id, enrViewer))) {
+        return reply.status(404).send({ error: 'Lead not found' });
+      }
+      const jobs = await sql.unsafe(
+        `SELECT * FROM enrichment_jobs WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 5`,
+        [id],
+      );
+      const logs = await sql.unsafe(
+        `SELECT id, provider, status, credits_used, created_at FROM enrichment_log WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 10`,
+        [id],
+      );
+      return { jobs, log: logs };
+    },
+  );
+
+  // Single enrichment job by id (survives refresh; DB is source of truth).
+  fastify.get(
+    '/enrichment/jobs/:jobId',
+    { preValidation: [authorize(['admin', 'sales_rep'])] },
+    async (req, reply) => {
+      const schema = z.object({ jobId: z.string().uuid() });
+      const parsed = schema.safeParse(req.params);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: 'Invalid job ID' });
+      }
+      const sql = getDB();
+      const jobViewer = req.user as { id: string; role: string };
+      const rows = await sql.unsafe(
+        `SELECT j.* FROM enrichment_jobs j JOIN leads l ON l.id = j.lead_id
+          WHERE j.id = $1 AND ($2::text = 'admin' OR l.assigned_to = $3::uuid OR l.claimed_by = $3::uuid)`,
+        [parsed.data.jobId, jobViewer.role, jobViewer.id],
+      );
+      if (!rows || rows.length === 0) {
+        return reply.status(404).send({ error: 'Job not found' });
+      }
+      return { job: rows[0] };
+    },
+  );
+
+  // Bulk claim: one atomic UPDATE wins per lead; losers are reported with
+  // their current owner instead of silently skipped.
+  fastify.post(
+    '/bulk-claim',
+    {
+      preValidation: [authorize(['admin', 'sales_rep'])],
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    },
+    async (req, reply) => {
+      const bodySchema = z.object({ lead_ids: z.array(z.string().uuid()).min(1).max(50) });
+      const parseResult = bodySchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
+      }
+      const me = req.user as { id: string };
+      const sql = getDB();
+      const won = (await sql.unsafe(
+        `UPDATE leads SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
+          WHERE id = ANY($2::uuid[]) AND claimed_by IS NULL RETURNING id`,
+        [me.id, parseResult.data.lead_ids],
+      )) as unknown as Array<{ id: string }>;
+      const wonIds = new Set(won.map((r) => r.id));
+      const lostIds = parseResult.data.lead_ids.filter((id) => !wonIds.has(id));
+      let already: Array<Record<string, unknown>> = [];
+      if (lostIds.length > 0) {
+        already = (await sql.unsafe(
+          `SELECT l.id, u.email AS claimed_by_email FROM leads l
+            LEFT JOIN users u ON u.id = l.claimed_by WHERE l.id = ANY($1::uuid[])`,
+          [lostIds],
+        )) as unknown as Array<Record<string, unknown>>;
+      }
+      if (wonIds.size > 0) {
+        await logAuditEvent({
+          user_id: me.id, action: 'bulk_claim_lead', resource_type: 'lead',
+          resource_id: '', details: { claimed: [...wonIds], skipped: lostIds },
+        });
+        await publishSSE(me.id, { type: 'leads_claimed', claimed: [...wonIds] });
+      }
+      return { claimed: [...wonIds], already_claimed: already };
+    },
+  );
+
+  // Bulk assign (admin only): one UPDATE for the whole set + one audit event.
+  fastify.patch(
+    '/bulk-assign',
+    { preValidation: [authorize(['admin'])] },
+    async (req, reply) => {
+      const bodySchema = z.object({
+        lead_ids: z.array(z.string().uuid()).min(1).max(50),
+        assigned_to: z.string().uuid().nullable(),
+      });
+      const parseResult = bodySchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
+      }
+      const { lead_ids, assigned_to } = parseResult.data;
+      const sql = getDB();
+      if (assigned_to) {
+        const user = await sql.unsafe(`SELECT id FROM users WHERE id = $1`, [assigned_to]);
+        if (!user || (user as unknown[]).length === 0) {
+          return reply.status(400).send({ error: 'Assigned user not found' });
+        }
+      }
+      const rows = (await sql.unsafe(
+        `UPDATE leads SET assigned_to = $1, updated_at = NOW()
+          WHERE id = ANY($2::uuid[]) RETURNING id`,
+        [assigned_to, lead_ids] as any,
+      )) as unknown as Array<{ id: string }>;
+      await logAuditEvent({
+        user_id: (req.user as { id: string }).id, action: 'bulk_assign_lead',
+        resource_type: 'lead', resource_id: '',
+        details: { assigned_to: assigned_to || null, lead_ids: rows.map((r) => r.id) },
+      });
+      await publishSSE((req.user as { id: string }).id, {
+        type: 'leads_assigned', assigned_to: assigned_to || null,
+        lead_ids: rows.map((r) => r.id),
+      });
+      return { assigned: rows.map((r) => r.id), assigned_to: assigned_to || null };
     },
   );
 
@@ -1211,7 +1635,7 @@ export const leadsRoutes: FastifyPluginAsync = async (fastify) => {
       // another's lead by guessing an id.
       const visible = await sql.unsafe(
         `SELECT id FROM leads
-          WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid)`,
+          WHERE id = ANY($1::uuid[]) AND ($2::text = 'admin' OR assigned_to = $3::uuid OR claimed_by = $3::uuid)`,
         [[id, merge_into_id], actor.role, actor.id] as any,
       );
       const allowed = new Set((visible as unknown as Array<{ id: string }>).map((r) => r.id));

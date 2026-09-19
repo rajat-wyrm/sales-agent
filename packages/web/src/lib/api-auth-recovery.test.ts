@@ -32,9 +32,9 @@ describe('401 auth recovery', () => {
     jest.mocked(navigateToLogin).mockClear();
     useAuthStore.setState({
       token: 'dead-access',
-      refreshToken: 'dead-refresh',
       user: { id: 'ghost', email: 'ghost@example.com', role: 'admin' } as any,
       isAuthenticated: true,
+      ready: true,
     });
     api.defaults.headers.common['Authorization'] = 'Bearer dead-access';
   });
@@ -69,7 +69,9 @@ describe('401 auth recovery', () => {
     const state = useAuthStore.getState();
     expect(state.isAuthenticated).toBe(false);
     expect(state.token).toBeNull();
-    expect(state.refreshToken).toBeNull();
+    // Nothing durable is stored client-side any more (no refreshToken field), so
+    // "cleared" also means the user object is gone.
+    expect(state.user).toBeNull();
     expect(api.defaults.headers.common['Authorization']).toBeUndefined();
     expect(navigateToLogin).toHaveBeenCalledTimes(1);
   }, 10000);
@@ -96,7 +98,9 @@ describe('401 auth recovery', () => {
       response: respondWith(401),
     });
     await expect(trigger(handler, other)).rejects.toBeTruthy();
-    expect(post).toHaveBeenCalledWith('/auth/refresh', expect.anything());
+    // No body: the refresh token now travels in an HttpOnly cookie, so the
+    // request carries no credential the page script can see.
+    expect(post).toHaveBeenCalledWith('/auth/refresh');
     await settle();
     expect(navigateToLogin).toHaveBeenCalledTimes(1);
   }, 10000);

@@ -31,6 +31,52 @@ from .utils.redact import redact_email
 
 logger = logging.getLogger(__name__)
 
+# Unified enrichment order: OSINT first (free), then paid fallbacks.
+# Configurable via ENRICHMENT_ORDER="osint,snovio,contactout,apollo" without code changes.
+DEFAULT_ENRICHMENT_ORDER = ["osint", "snovio", "contactout", "apollo"]
+
+
+def enrichment_order() -> list[str]:
+    raw = os.environ.get("ENRICHMENT_ORDER", "")
+    if not raw.strip():
+        return list(DEFAULT_ENRICHMENT_ORDER)
+    seen: list[str] = []
+    for part in raw.split(","):
+        p = part.strip().lower()
+        if p and p not in seen:
+            seen.append(p)
+    return seen or list(DEFAULT_ENRICHMENT_ORDER)
+
+
+async def _provider_cooldown(redis_client: Any | None, provider: str) -> bool:
+    """True when provider is in cooldown (429/circuit-open). Never raises."""
+    if redis_client is None:
+        return False
+    try:
+        return bool(await redis_client.get(f"enrich:cooldown:{provider}"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _set_provider_cooldown(redis_client: Any | None, provider: str, seconds: int) -> None:
+    if redis_client is None:
+        return
+    try:
+        await redis_client.set(f"enrich:cooldown:{provider}", "1", ex=max(1, seconds))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _backoff_seconds(attempt: int, retry_after: float | None = None) -> float:
+    """Exponential backoff with jitter; honors Retry-After when present."""
+    import random
+    base = min(120.0, (2.0 ** max(0, attempt)) * 1.5)
+    jitter = random.uniform(0, base * 0.25)
+    wait = base + jitter
+    if retry_after and retry_after > 0:
+        wait = max(wait, min(300.0, retry_after + jitter))
+    return wait
+
 
 async def call_contactout(hr_linkedin_url: str, api_key: str) -> dict[str, Any] | None:
     """Call ContactOut API with LinkedIn URL. Returns extracted contact data or None."""
@@ -49,6 +95,17 @@ async def call_contactout(hr_linkedin_url: str, api_key: str) -> dict[str, Any] 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code == 429:
+                # Rate-limited: back off with jitter, do NOT hammer. Caller moves
+                # to the next fallback provider; cooldown prevents immediate retry.
+                retry_after: float | None = None
+                try:
+                    retry_after = float(resp.headers.get("retry-after", "") or 0) or None
+                except (TypeError, ValueError):
+                    retry_after = None
+                logger.warning(f"ContactOut 429 rate-limited; backing off {_backoff_seconds(1, retry_after):.1f}s")
+                await asyncio.sleep(_backoff_seconds(1, retry_after))
+                return None
             if resp.status_code != 200:
                 logger.warning(
                     f"ContactOut returned {resp.status_code} from {url} "
@@ -73,7 +130,7 @@ async def call_contactout(hr_linkedin_url: str, api_key: str) -> dict[str, Any] 
         return None
 
 
-async def call_snovio(hr_name: str, company_name: str, company_domain: str, api_key: str, api_secret: str) -> dict[str, Any] | None:
+async def call_snovio(hr_name: str, company_name: str, company_domain: str, api_key: str, api_secret: str | None = None) -> dict[str, Any] | None:
     """Call Snov.io email finder API. Returns extracted contact data or None."""
     import httpx
 
@@ -95,6 +152,15 @@ async def call_snovio(hr_name: str, company_name: str, company_domain: str, api_
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, params=params)
+            if resp.status_code == 429:
+                retry_after: float | None = None
+                try:
+                    retry_after = float(resp.headers.get("retry-after", "") or 0) or None
+                except (TypeError, ValueError):
+                    retry_after = None
+                logger.warning(f"Snov.io 429 rate-limited; backing off {_backoff_seconds(1, retry_after):.1f}s")
+                await asyncio.sleep(_backoff_seconds(1, retry_after))
+                return None
             if resp.status_code != 200:
                 # 403 means the account lacks the Email Finder entitlement; say so
                 # instead of logging a bare status the operator cannot act on.
@@ -419,77 +485,126 @@ async def run_enrichment_cascade(
     credits_used = 0
     status = "success"
 
-    # Cost-aware order (SRS §4.5.4 + operator rule: free first, paid ONLY for
-    # records still missing a contact, and per-record). The cascade runs every
-    # free/public source, then fires the paid email waterfall internally as a
-    # last resort (Tier 4) only if no free tier produced an address.
-    if provider == "auto" or provider in ("osint", "osint_fallback"):
-        enrichment_result = await run_osint_enrichment(
-            db_pool, company_name, hr_name, company_domain, api_keys
-        )
-        used_provider = enrichment_result.get("method") or enrichment_result.get(
-            "source", "osint_fallback")
-        # free tiers -> osint_* ; a per-record paid hit -> paid_<vendor>
-        credits_used = int(enrichment_result.get("paid_credits", 0))
-
-    # Step 1: ContactOut API — only when the cascade found nothing usable AND
-    # a LinkedIn URL is on file (it keys off the profile) AND a key exists.
+    # Unified fallback order: OSINT → Snov → ContactOut → Apollo.
+    # Free first, paid ONLY for records still missing a contact, per-record.
+    # provider="auto" walks enrichment_order(); an explicit provider runs only itself.
     contactout_key_missing = False
-    if (
-        not enrichment_result or not enrichment_result.get("hr_email")
-    ) and provider in ("contactout", "auto"):
-        contactout_key = (
-            api_keys.get("contactout")
-            or os.environ.get("CONTACT_OUT_API_KEY")
-            or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
-            or os.environ.get("ACCONTOUT_API_KEY")
-        )
-        if provider == "contactout" and not contactout_key:
-            contactout_key_missing = True
-        if contactout_key and hr_linkedin:
-            result = await call_contactout(hr_linkedin, contactout_key)
-            if result:
-                enrichment_result = {**(enrichment_result or {}), **result}
-                used_provider = "contactout"
-                credits_used = 1
-                status = "success"
-
-    # Step 2: Snov.io API — final paid fallback if still no email.
     snovio_key_missing = False
-    if (
-        not enrichment_result or not enrichment_result.get("hr_email")
-    ) and provider in ("snovio", "auto"):
-        snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
-        snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
-        if provider == "snovio" and not snovio_key:
-            snovio_key_missing = True
-        if snovio_key and hr_name and company_name:
-            result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
-            if result:
-                enrichment_result = {**(enrichment_result or {}), **result}
-                used_provider = "snovio"
-                credits_used = 1
-                status = "success"
+    order = [provider] if provider not in ("auto",) else enrichment_order()
 
-    # Explicit single-provider override (operator clicked "enrich via X").
-    if provider not in ("auto", "osint", "osint_fallback", "contactout", "snovio"):
+    async def _run_step(step: str) -> None:
+        nonlocal enrichment_result, used_provider, credits_used, status
+        nonlocal contactout_key_missing, snovio_key_missing
+        if enrichment_result and enrichment_result.get("hr_email"):
+            return  # field-level short-circuit: email already verified, skip paid spend
+        if step in ("osint", "osint_fallback"):
+            enrichment_result = await run_osint_enrichment(
+                db_pool, company_name, hr_name, company_domain, api_keys
+            )
+            used_provider = enrichment_result.get("method") or enrichment_result.get(
+                "source", "osint_fallback")
+            credits_used = int(enrichment_result.get("paid_credits", 0))
+        elif step == "snovio":
+            snovio_key = api_keys.get("snovio") or os.environ.get("SNOVIO_API_KEY")
+            snovio_secret = api_keys.get("snovio_secret") or os.environ.get("SNOVIO_API_SECRET")
+            if provider == "snovio" and not snovio_key:
+                snovio_key_missing = True
+            if snovio_key and hr_name and company_name:
+                result = await call_snovio(hr_name, company_name, company_domain, snovio_key, snovio_secret)
+                if result:
+                    # Field-level merge: never overwrite a stronger verified value
+                    # with a weaker one — only fill missing fields.
+                    base = dict(enrichment_result or {})
+                    for k, v in result.items():
+                        if k in ("hr_email", "hr_mobile", "hr_name", "hr_linkedin_url"):
+                            if not base.get(k) and v:
+                                base[k] = v
+                        else:
+                            base.setdefault(k, v)
+                    base.setdefault("provenance", {}).update({k: "snovio" for k in result if result.get(k)})
+                    enrichment_result = base
+                    used_provider = "snovio"
+                    credits_used = 1
+                    status = "success"
+        elif step == "contactout":
+            contactout_key = (
+                api_keys.get("contactout")
+                or os.environ.get("CONTACT_OUT_API_KEY")
+                or os.environ.get("ACCONTACT_OUT_API_KEY")  # legacy alias, kept for compat
+                or os.environ.get("ACCONTOUT_API_KEY")
+            )
+            if provider == "contactout" and not contactout_key:
+                contactout_key_missing = True
+            if contactout_key and hr_linkedin:
+                result = await call_contactout(hr_linkedin, contactout_key)
+                if result:
+                    base = dict(enrichment_result or {})
+                    for k, v in result.items():
+                        if k in ("hr_email", "hr_mobile", "hr_name", "hr_linkedin_url"):
+                            if not base.get(k) and v:
+                                base[k] = v
+                        else:
+                            base.setdefault(k, v)
+                    base.setdefault("provenance", {}).update({k: "contactout" for k in result if result.get(k)})
+                    enrichment_result = base
+                    used_provider = "contactout"
+                    credits_used = 1
+                    status = "success"
+
+    for _step in order:
+        if _step in ("osint", "osint_fallback", "snovio", "contactout"):
+            await _run_step(_step)
+    # Apollo / other paid vendors remain fallbacks (auto includes them when no
+    # email yet); explicit single-provider override handled below.
+
+    # Apollo + other paid vendors: explicit override, or auto-fallback steps
+    # (in enrichment_order()) when everything above found no email.
+    _fallback_vendors = ("apollo", "apollo_io", "hunter", "lusha", "rocketreach", "prospeo", "findymail")
+    _wanted: list[str] = []
+    if provider in _fallback_vendors:
+        _wanted = [provider]
+    elif provider == "auto":
+        _wanted = [s for s in order if s in _fallback_vendors]
+        if not enrichment_result or not enrichment_result.get("hr_email"):
+            _wanted = _wanted or (["apollo"] if "apollo" in enrichment_order() or True else [])
+            # Default apollo fallback even when order omits vendors: graceful,
+            # skipped without a key.
+            if "apollo" not in _wanted:
+                _wanted = ["apollo"]
+    if _wanted and (not enrichment_result or not enrichment_result.get("hr_email")):
         try:
             from .utils.email_providers import enrich_via_apollo_io, enrich_via_hunter, enrich_via_lusha, enrich_via_rocketreach, enrich_via_prospeo, enrich_via_findymail
-            _single = {
+            _single_map = {
                 "hunter": enrich_via_hunter, "apollo": enrich_via_apollo_io,
                 "apollo_io": enrich_via_apollo_io, "lusha": enrich_via_lusha,
                 "rocketreach": enrich_via_rocketreach, "prospeo": enrich_via_prospeo,
                 "findymail": enrich_via_findymail,
-            }.get(provider)
-            if _single:
-                r = await _single(hr_name, company_domain, api_keys.get(provider))
+            }
+            for _name in _wanted:
+                _single = _single_map.get(_name)
+                if not _single:
+                    continue
+                try:
+                    r = await _single(hr_name, company_domain, api_keys.get(_name))
+                except TypeError:
+                    # 429-backed-off adapters may raise; treat as miss, keep chain alive.
+                    logger.warning(f"provider {_name} errored; continuing fallback")
+                    continue
                 if r and r.get("hr_email"):
-                    enrichment_result = {**(enrichment_result or {}), **r}
-                    used_provider = provider
+                    base = dict(enrichment_result or {})
+                    for k, v in r.items():
+                        if k in ("hr_email", "hr_mobile", "hr_name", "hr_linkedin_url"):
+                            if not base.get(k) and v:
+                                base[k] = v
+                        else:
+                            base.setdefault(k, v)
+                    enrichment_result = base
+                    used_provider = _name
                     credits_used = 1
                     status = "success"
+                    break
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"explicit provider {provider} failed: {e}")
+            logger.warning(f"fallback vendors { _wanted} failed: {e}")
 
     if enrichment_result is None or (
         not enrichment_result.get("hr_email")
@@ -526,6 +641,73 @@ async def run_enrichment_cascade(
     return enrichment_result, used_provider, credits_used, status
 
 
+def _merge_lists(old: Any, new: Any) -> list:
+    """Dedupe-preserving merge for JSONB array columns (emails, phones, tech)."""
+    seen: list = []
+    for v in (old or []) + (new or []):
+        if v and v not in seen:
+            seen.append(v)
+    return seen
+
+
+def _merge_dicts(old: Any, new: Any) -> dict:
+    base = dict(old or {})
+    base.update(new or {})
+    return base
+
+
+def collect_person_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Every person field the cascade/providers found, mapped to hr_contacts columns."""
+    extra_phones = [p for p in (result.get("extra_phones") or []) if p]
+    return {
+        "full_name": result.get("hr_name", "") or "",
+        "linkedin_url": result.get("hr_linkedin_url", "") or "",
+        "personal_email": result.get("hr_email", "") or "",
+        "personal_mobile": result.get("hr_mobile", "") or "",
+        "job_title": result.get("person_title", "") or "",
+        "department": result.get("person_department", "") or "",
+        "seniority": result.get("person_seniority", "") or "",
+        "location": result.get("person_location", "") or "",
+        "phones": extra_phones,
+        "email_verified": bool(result.get("email_verified") or result.get("verified")),
+        "socials": {k: v for k, v in {
+            "twitter": result.get("person_twitter", ""),
+            "github": result.get("person_github", ""),
+        }.items() if v},
+    }
+
+
+def collect_company_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Every company field the cascade/providers found, mapped to companies columns."""
+    tech = [t for t in (result.get("company_tech") or []) if t]
+    return {
+        "employee_count": result.get("company_employee_count"),
+        "revenue": result.get("company_revenue", "") or "",
+        "founded_year": result.get("company_founded"),
+        "tech_stack": tech,
+        "linkedin_url": result.get("company_linkedin_url", "") or "",
+        "industry": result.get("company_industry", "") or "",
+    }
+
+
+def collect_provenance(result: dict[str, Any], used_provider: str) -> dict[str, Any]:
+    """Per-field { source, verified, at }: which provider gave us each fact."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    prov = dict(result.get("provenance") or {})
+    verified = bool(result.get("verified"))
+    for key in ("full_name", "linkedin_url", "personal_email", "personal_mobile",
+                "job_title", "department", "seniority", "location"):
+        if result.get({
+            "full_name": "hr_name", "linkedin_url": "hr_linkedin_url",
+            "personal_email": "hr_email", "personal_mobile": "hr_mobile",
+            "job_title": "person_title", "department": "person_department",
+            "seniority": "person_seniority", "location": "person_location",
+        }[key]) and key not in prov:
+            prov[key] = {"source": used_provider, "verified": verified, "at": now}
+    return prov
+
+
 async def process_enrichment_job(
     payload: dict[str, Any],
     redis_client: redis.Redis,
@@ -542,8 +724,32 @@ async def process_enrichment_job(
         return
 
     logger.info(f"Processing enrichment for lead {lead_id}, provider={provider}")
+    job_id = payload.get("job_id")
+
+    async def _mark_job(conn: Any, status: str, stage: str, error: Any = None, summary: Any = None) -> None:
+        # enrichment_jobs may not exist on old DBs; never let telemetry break the pipeline.
+        try:
+            if job_id:
+                await conn.execute(
+                    """UPDATE enrichment_jobs SET status=$2, current_stage=$3,
+                       attempts=attempts+1, error=$4, result_summary=$5, updated_at=NOW()
+                       WHERE id=$1""",
+                    job_id, status, stage,
+                    json.dumps(error) if error is not None else None,
+                    json.dumps(summary) if summary is not None else None,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"enrichment_jobs update skipped: {e}")
 
     async with db_pool.acquire() as conn:
+        if job_id:
+            try:
+                await conn.execute(
+                    "UPDATE enrichment_jobs SET status='running', current_stage='running', updated_at=NOW() WHERE id=$1",
+                    job_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"enrichment_jobs running-mark skipped: {e}")
         lead = await conn.fetchrow(
             """
             SELECT l.id, l.hr_contact_id, l.pipeline_stage, l.company_id,
@@ -586,69 +792,109 @@ async def process_enrichment_job(
 
     # Connection released at the end of the read block above; the cascade makes
     # no use of it, and the write block below re-acquires.
-    enrichment_result, used_provider, credits_used, status = await run_enrichment_cascade(
-        db_pool, provider, company_name, company_domain, hr_name, hr_linkedin, api_keys,
-    )
-
-    async with db_pool.acquire() as conn:
-        # Update enrichment_log
-        await conn.execute(
-            """
-            INSERT INTO enrichment_log
-              (lead_id, provider, requested_by, request_payload, response_payload, credits_used, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            """,
-            lead_id,
-            used_provider,
-            user_id,                       # NULL for scheduled/sentinel runs
-            json.dumps({"provider": provider, "requested_at": requested_at}),
-            json.dumps(enrichment_result or {}),
-            credits_used,
-            status,
+    try:
+        enrichment_result, used_provider, credits_used, status = await run_enrichment_cascade(
+            db_pool, provider, company_name, company_domain, hr_name, hr_linkedin, api_keys,
         )
+    except Exception as e:  # noqa: BLE001
+        # The job row must never stick at running: record the failure so the UI
+        # is honest, then re-raise so the queue redrives/DLQs normally.
+        async with db_pool.acquire() as conn:
+            await _mark_job(conn, "failed", "cascade_error",
+                            error={"error": str(e)[:500], "provider": provider})
+        raise
 
-        # Update HR contact / lead
-        if enrichment_result:
-            new_hr_email = enrichment_result.get("hr_email", "")
-            new_hr_mobile = enrichment_result.get("hr_mobile", "")
-            new_hr_linkedin = enrichment_result.get("hr_linkedin_url", "")
-            new_hr_name = enrichment_result.get("hr_name", "")
-            confidence = enrichment_result.get("confidence_score", 0)
+    person = collect_person_fields(enrichment_result or {})
+    company = collect_company_fields(enrichment_result or {})
+    confidence = (enrichment_result or {}).get("confidence_score", 0)
+    # Locator rule mirrors hr_contacts_has_locator: a contact row needs at
+    # least one real way to reach the person. Name-only findings must NOT be
+    # inserted (used to crash on the CHECK and retry 5x into the DLQ).
+    has_locator = bool(person["personal_email"] or person["personal_mobile"] or person["linkedin_url"])
 
-            if new_hr_name or new_hr_linkedin or new_hr_email or new_hr_mobile:
-                # Create or update HR contact.
-                #
+    try:
+        async with db_pool.acquire() as conn:
+            # Update enrichment_log
+            await conn.execute(
+                """
+                INSERT INTO enrichment_log
+                  (lead_id, provider, requested_by, request_payload, response_payload, credits_used, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                lead_id,
+                used_provider,
+                user_id,                       # NULL for scheduled/sentinel runs
+                json.dumps({"provider": provider, "requested_at": requested_at}),
+                json.dumps(enrichment_result or {}),
+                credits_used,
+                status,
+            )
+
+            # Update HR contact / lead — full person record, never clobbering a
+            # stronger verified value with a weaker one (confidence-gated).
+            if has_locator:
+                prov = collect_provenance(enrichment_result or {}, used_provider)
                 # Only trust the lead's existing link when it actually belongs to
                 # this lead's company. Legacy rows carry a contact that was matched
                 # globally (a recruiter from an unrelated employer); updating that
                 # row would overwrite a real person's details with someone else's,
                 # so re-point the lead at a correctly-scoped contact instead.
                 if lead["hr_contact_id"] and lead["contact_company_id"] == lead["company_id"]:
+                    cur = await conn.fetchrow(
+                        """SELECT personal_email, personal_mobile, emails, phones,
+                                  socials, field_provenance, email_verified
+                           FROM hr_contacts WHERE id = $1""",
+                        lead["hr_contact_id"],
+                    )
+                    curd = dict(cur) if cur else {}
+                    merged_emails = _merge_lists(curd.get("emails"), [person["personal_email"]])
+                    merged_phones = _merge_lists(
+                        _merge_lists(curd.get("phones"), [person["personal_mobile"]]),
+                        person["phones"],
+                    )
                     await conn.execute(
                         """
                         UPDATE hr_contacts
-                        SET full_name = COALESCE(full_name, $1),
+                        SET full_name = COALESCE(NULLIF(full_name, ''), NULLIF($1, '')),
                             linkedin_url = CASE
                                 WHEN linkedin_url IS NULL OR linkedin_url = ''
-                                     OR $5 > confidence_score
+                                     OR $11 > confidence_score
                                 THEN COALESCE(NULLIF($2, ''), linkedin_url) ELSE linkedin_url END,
                             personal_email = CASE
                                 WHEN personal_email IS NULL OR personal_email = ''
-                                     OR $5 > confidence_score
+                                     OR $11 > confidence_score
                                 THEN COALESCE(NULLIF($3, ''), personal_email) ELSE personal_email END,
                             personal_mobile = CASE
                                 WHEN personal_mobile IS NULL OR personal_mobile = ''
-                                     OR $5 > confidence_score
+                                     OR $11 > confidence_score
                                 THEN COALESCE(NULLIF($4, ''), personal_mobile) ELSE personal_mobile END,
-                            confidence_score = GREATEST(confidence_score, $5),
+                            job_title = COALESCE(NULLIF(job_title, ''), NULLIF($5, '')),
+                            department = COALESCE(NULLIF(department, ''), NULLIF($6, '')),
+                            seniority = COALESCE(NULLIF(seniority, ''), NULLIF($7, '')),
+                            location = COALESCE(NULLIF(location, ''), NULLIF($8, '')),
+                            emails = $9::jsonb,
+                            phones = $10::jsonb,
+                            email_verified = email_verified OR $12,
+                            socials = socials || $13::jsonb,
+                            field_provenance = field_provenance || $14::jsonb,
+                            confidence_score = GREATEST(confidence_score, $11),
                             updated_at = NOW()
-                        WHERE id = $6
+                        WHERE id = $15
                         """,
-                        new_hr_name or None,
-                        new_hr_linkedin or None,
-                        new_hr_email or None,
-                        new_hr_mobile or None,
+                        person["full_name"] or None,
+                        person["linkedin_url"] or None,
+                        person["personal_email"] or None,
+                        person["personal_mobile"] or None,
+                        person["job_title"] or None,
+                        person["department"] or None,
+                        person["seniority"] or None,
+                        person["location"] or None,
+                        json.dumps(merged_emails),
+                        json.dumps(merged_phones),
                         confidence,
+                        person["email_verified"],
+                        json.dumps(person["socials"]),
+                        json.dumps(prov),
                         lead["hr_contact_id"],
                     )
                 else:
@@ -656,14 +902,27 @@ async def process_enrichment_job(
                         """
                         INSERT INTO hr_contacts
                           (full_name, linkedin_url, personal_email, personal_mobile,
+                           job_title, department, seniority, location, emails, phones,
+                           email_verified, socials, field_provenance,
                            current_company_id, confidence_score)
-                        VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $6)
+                        VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''),
+                                NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''),
+                                $9::jsonb, $10::jsonb, $11, $12::jsonb, $13::jsonb, $14, $15)
                         RETURNING id
                         """,
-                        new_hr_name or None,
-                        new_hr_linkedin or None,
-                        new_hr_email or None,
-                        new_hr_mobile or None,
+                        person["full_name"] or None,
+                        person["linkedin_url"] or None,
+                        person["personal_email"] or None,
+                        person["personal_mobile"] or None,
+                        person["job_title"] or None,
+                        person["department"] or None,
+                        person["seniority"] or None,
+                        person["location"] or None,
+                        json.dumps(_merge_lists([], [person["personal_email"]])),
+                        json.dumps(_merge_lists([person["personal_mobile"]], person["phones"])),
+                        person["email_verified"],
+                        json.dumps(person["socials"]),
+                        json.dumps(prov),
                         lead["company_id"],
                         confidence,
                     )
@@ -673,22 +932,73 @@ async def process_enrichment_job(
                         lead_id,
                     )
 
-        # Update pipeline stage. Deterministic lifecycle: a lead whose full
-        # enrichment army found NO usable contact is marked 'contact_unavailable'
-        # (never a fabricated contact), and is still picked up by the daily
-        # re-enrichment sweep. Only leads with a real contact advance to verify.
-        has_contact = bool(
-            enrichment_result and (
-                enrichment_result.get("hr_email")
-                or enrichment_result.get("hr_mobile")
-                or enrichment_result.get("hr_linkedin_url")
+            # Company firmographics: fill only what is unknown, merge tech/provenance.
+            if any([company["employee_count"], company["revenue"], company["founded_year"],
+                    company["tech_stack"], company["linkedin_url"], company["industry"]]):
+                cur_co = await conn.fetchrow(
+                    """SELECT employee_count, revenue, founded_year, tech_stack,
+                              linkedin_url, industry, field_provenance
+                       FROM companies WHERE id = $1""",
+                    lead["company_id"],
+                )
+                if cur_co:
+                    cod = dict(cur_co)
+                    import datetime as _dt
+                    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+                    co_prov = dict(cod.get("field_provenance") or {})
+                    for k in ("employee_count", "revenue", "founded_year", "tech_stack",
+                              "linkedin_url", "industry"):
+                        if company.get(k) and k not in co_prov:
+                            co_prov[k] = {"source": used_provider, "at": now_iso}
+                    await conn.execute(
+                        """UPDATE companies
+                           SET employee_count = COALESCE(employee_count, $1),
+                               revenue = COALESCE(NULLIF(revenue, ''), NULLIF($2, '')),
+                               founded_year = COALESCE(founded_year, $3),
+                               tech_stack = $4::jsonb,
+                               linkedin_url = COALESCE(NULLIF(linkedin_url, ''), NULLIF($5, '')),
+                               industry = COALESCE(NULLIF(industry, ''), NULLIF($6, '')),
+                               field_provenance = field_provenance || $7::jsonb,
+                               updated_at = NOW()
+                           WHERE id = $8""",
+                        company["employee_count"],
+                        company["revenue"] or None,
+                        company["founded_year"],
+                        json.dumps(_merge_lists(cod.get("tech_stack"), company["tech_stack"])),
+                        company["linkedin_url"] or None,
+                        company["industry"] or None,
+                        json.dumps(co_prov),
+                        lead["company_id"],
+                    )
+
+            # Update pipeline stage. Deterministic lifecycle: a lead whose full
+            # enrichment army found NO usable contact is marked 'contact_unavailable'
+            # (never a fabricated contact), and is still picked up by the daily
+            # re-enrichment sweep. Only leads with a real contact advance to verify.
+            has_contact = has_locator
+            await conn.execute(
+                "UPDATE leads SET pipeline_stage = $2, updated_at = NOW() WHERE id = $1",
+                lead_id,
+                "enriched" if has_contact else "contact_unavailable",
             )
-        )
-        await conn.execute(
-            "UPDATE leads SET pipeline_stage = $2, updated_at = NOW() WHERE id = $1",
-            lead_id,
-            "enriched" if has_contact else "contact_unavailable",
-        )
+
+            # Persistent job state: DB is source of truth across refresh/restart.
+            has_email = bool(person["personal_email"])
+            job_status = "completed" if has_email else ("partial" if has_contact else ("failed" if status in ("no_match",) else status))
+            await _mark_job(
+                conn, job_status, used_provider,
+                error=None if has_contact else {"status": status, "provider": used_provider},
+                summary={"provider": used_provider, "status": status,
+                         "has_email": has_email, "has_contact": has_contact,
+                         "credits_used": credits_used,
+                         "person_fields": [k for k, v in person.items() if v],
+                         "company_fields": [k for k, v in company.items() if v]},
+            )
+    except Exception as e:  # noqa: BLE001
+        async with db_pool.acquire() as conn:
+            await _mark_job(conn, "failed", used_provider,
+                            error={"error": str(e)[:500], "provider": used_provider})
+        raise
 
     # Recompute lead score
     await recompute_lead_score(db_pool, lead_id)

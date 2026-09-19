@@ -48,7 +48,8 @@ async def dlq_depth(redis_client: redis.Redis, queue_name: str) -> int:
         return -1
 
 
-BROADCAST_CHANNEL = "broadcast:sse"
+SHARED_CHANNEL = "shared:sse"
+OPS_CHANNEL = "ops:sse"
 
 
 async def publish_event(
@@ -56,21 +57,70 @@ async def publish_event(
     requested_by: str | None,
     payload: dict[str, Any],
 ) -> None:
-    """Publish a pipeline event to the requester's channel AND the global
-    broadcast channel.
+    """Publish a pipeline event to exactly the channels the API's SSE fan-out
+    would have used (see packages/api/src/utils/sse.ts, which documents this
+    channel contract).
 
-    Root-cause fix for invisible background work: army/scheduler runs pass
-    sentinels ("system"/"daily_scheduler") as requested_by, so publishing
-    only to user:{requested_by}:sse meant NO browser ever received wave
-    completions. Every EventSource also subscribes to broadcast:sse, so
-    list/dashboard/detail pages update in real time no matter who (or what)
-    triggered the work. Never raises (fire-and-forget telemetry).
+    Root-cause fix for invisible background work AND for the cross-tenant leak,
+    in one place:
+
+    - army/scheduler runs pass sentinels ("system"/"daily_scheduler") as
+      requested_by, so publishing only to user:{requested_by}:sse meant NO
+      browser ever received wave completions. Background-triggered lead work is
+      therefore addressed through the lead's own audience.
+    - The previous broadcast:sse delivered every lead event to every logged-in
+      user, so a rep's browser received ids/outcomes for other reps' leads.
+      There is no wildcard channel on either side of the contract any more.
+
+    Routing, mirroring the API:
+      payload has lead_id -> lead's owners, or shared:sse when UNOWNED (every
+        authenticated user may already read unassigned rows, so the channel's
+        audience is exactly the set of users permitted to see them); on any
+        lookup failure, fail SOFT to the actor's channel rather than widening.
+      payload has no lead_id -> ops:sse (admin-only subscribers).
+      requested_by is always included (it may be a sentinel; the API ignores
+      unknown channel members, so a sentinel is harmless).
+    Never raises (fire-and-forget telemetry).
     """
     try:
         body = json.dumps(payload, default=str)
-        targets = [BROADCAST_CHANNEL]
+        targets: set[str] = set()
         if requested_by:
-            targets.append(f"user:{requested_by}:sse")
+            targets.add(f"user:{requested_by}:sse")
+        lead_id = payload.get("lead_id")
+        if lead_id:
+            owners: list[str] | None = None
+            try:
+                from .utils.db import _pool
+                # Read-only audience lookup; the worker's shared pool when it is
+                # already up. It usually is (these publishes happen at the end of
+                # a job that just used the DB), so no pool is created for a
+                # fire-and-forget telemetry call. Without a pool we fall through
+                # to the fail-soft branch below.
+                pool = _pool
+                if pool is not None:
+                    rows = await pool.fetch(
+                        "SELECT assigned_to, claimed_by FROM leads WHERE id = $1",
+                        str(lead_id),
+                    )
+                    row = rows[0] if rows else None
+                    if row is not None:
+                        owners = [
+                            str(v) for v in (row["assigned_to"], row["claimed_by"]) if v
+                        ]
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"SSE audience lookup for lead {lead_id} failed: {e}")
+                owners = None
+            if owners is None:
+                # Row deleted (or lookup failed): nobody can be watching the
+                # lead, so the actor's channel alone is the right audience.
+                pass
+            elif not owners:
+                targets.add(SHARED_CHANNEL)
+            else:
+                targets.update(f"user:{owner}:sse" for owner in owners)
+        else:
+            targets.add(OPS_CHANNEL)
         for channel in targets:
             try:
                 await redis_client.publish(channel, body)

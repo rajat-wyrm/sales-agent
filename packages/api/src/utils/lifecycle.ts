@@ -1,5 +1,5 @@
 // Lead lifecycle transition machine — TS mirror of
-// database/schema/functions/020_leads_stage_transition.sql (keep in sync).
+// database/schema/functions.sql (keep in sync).
 // The DB trigger is the final boundary; this helper lets app code fail fast
 // with a readable error instead of waiting for a constraint violation.
 //

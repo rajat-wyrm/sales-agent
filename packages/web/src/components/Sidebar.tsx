@@ -14,6 +14,7 @@ const SECTIONS: { label: string; items: { to: string; label: string; icon: IconT
   { label: "Workspace", items: [
     { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { to: "/leads", label: "Leads", icon: Users },
+    { to: "/my-leads", label: "My Leads", icon: Users },
     { to: "/companies", label: "Companies", icon: Building2 },
     { to: "/contacts", label: "HR Contacts", icon: Contact },
   ] },
@@ -45,7 +46,7 @@ function NavItem({ to, label, icon: Icon, collapsed, onNavigate }: NavItemProps)
       {({ isActive }) => (
         <>
           {/* left accent bar when active */}
-          <span className={cn("absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-[image:var(--grad-primary)] transition-opacity", isActive ? "opacity-100" : "opacity-0")} />
+          <span className={cn("absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-primary transition-opacity", isActive ? "opacity-100" : "opacity-0")} />
           <Icon className={cn("h-[18px] w-[18px] shrink-0", isActive && "text-primary")} strokeWidth={isActive ? 2.3 : 1.9} />
           <span className={cn("truncate", collapsed && "hidden")}>{label}</span>
         </>

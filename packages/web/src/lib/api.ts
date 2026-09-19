@@ -6,6 +6,10 @@ import { navigateToLogin } from './navigation';
 const api = axios.create({
   baseURL: API_URL,
   timeout: 30000,
+  // Send/receive the session cookies (refresh_token, sse_auth). Same-origin
+  // requests already carry them; this covers a deployment that points
+  // VITE_API_URL at another host with an explicit CORS origin.
+  withCredentials: true,
 });
 
 let isRefreshing = false;
@@ -50,17 +54,16 @@ api.interceptors.response.use(
 
       try {
         const mod = await import('@/stores/auth');
-        const useAuthStore = mod.useAuthStore;
-        const refreshToken = useAuthStore.getState().refreshToken;
-
-        if (!refreshToken) {
-          throw new Error('No refresh token');
+        // refreshSession() exchanges the HttpOnly refresh cookie for a new access
+        // token. The store used to hold the refresh token and post it in the body;
+        // nothing durable now lives in JS, so a 401 can only be resolved by the
+        // browser presenting its own cookie. It returns false instead of throwing
+        // so this interceptor owns the failure path (clear + redirect) once.
+        const refreshed = await mod.useAuthStore.getState().refreshSession();
+        const newToken = mod.useAuthStore.getState().token;
+        if (!refreshed || !newToken) {
+          throw new Error('Session expired');
         }
-
-        const res = await api.post('/auth/refresh', { refresh_token: refreshToken });
-        const newToken = res.data.access_token;
-
-        useAuthStore.getState().setTokens(newToken, res.data.refresh_token || refreshToken);
 
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
         onRefreshed(newToken);
@@ -179,12 +182,44 @@ export const leads = {
     const res = await api.post('/leads/bulk-draft', { lead_ids: leadIds, channel });
     return res.data;
   },
+  bulkClaim: async (leadIds: string[]) => {
+    const res = await api.post('/leads/bulk-claim', { lead_ids: leadIds });
+    return res.data as { claimed: string[]; already_claimed: Array<{ id: string; claimed_by_email: string | null }> };
+  },
+  bulkAssign: async (leadIds: string[], assignedTo: string | null) => {
+    const res = await api.patch('/leads/bulk-assign', { lead_ids: leadIds, assigned_to: assignedTo });
+    return res.data as { assigned: string[]; assigned_to: string | null };
+  },
   setDoNotContact: async (id: string, doNotContact: boolean) => {
     const res = await api.patch(`/leads/${id}/do-not-contact`, { do_not_contact: doNotContact });
     return res.data;
   },
   assign: async (id: string, assignedTo: string | null) => {
     const res = await api.patch(`/leads/${id}/assign`, { assigned_to: assignedTo });
+    return res.data;
+  },
+  claim: async (id: string) => {
+    const res = await api.post(`/leads/${id}/claim`, {});
+    return res.data;
+  },
+  ownership: async (id: string) => {
+    const res = await api.get(`/leads/${id}/ownership`);
+    return res.data;
+  },
+  my: async (params?: Record<string, any>) => {
+    const res = await api.get('/leads/my', { params });
+    return res.data;
+  },
+  mine: async (params?: Record<string, any>) => {
+    const res = await api.get('/leads', { params: { ...params, mine: true } });
+    return res.data;
+  },
+  enrichment: async (id: string) => {
+    const res = await api.get(`/leads/${id}/enrichment`);
+    return res.data as { jobs: any[]; log: any[] };
+  },
+  enrichmentJob: async (jobId: string) => {
+    const res = await api.get(`/leads/enrichment/jobs/${jobId}`);
     return res.data;
   },
   getDuplicates: async () => {
@@ -360,6 +395,14 @@ export const admin = {
   getUsers: async () => {
     const res = await api.get('/users');
     return res.data;
+  },
+  teamMembers: async () => {
+    const res = await api.get('/team/members');
+    return res.data as { members: Array<{ id: string; email: string; role: string }> };
+  },
+  enrichmentOrder: async () => {
+    const res = await api.get('/enrichment/order');
+    return res.data as { order: string[] };
   },
 };
 

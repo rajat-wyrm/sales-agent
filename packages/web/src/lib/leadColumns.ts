@@ -53,6 +53,13 @@ export const LEAD_COLUMNS: LeadColumn[] = [
   { header: 'Salary Period', field: 'salary_period', group: 'Compensation', get: (r) => r.salary_period },
 
   { header: 'HR Name', field: 'hr_name', group: 'HR contact', get: (r) => r.hr_name },
+  { header: 'HR Title', field: 'hr_title', group: 'HR contact', get: (r) => r.hr_title },
+  { header: 'HR Department', field: 'hr_department', group: 'HR contact', get: (r) => r.hr_department },
+  { header: 'HR Seniority', field: 'hr_seniority', group: 'HR contact', get: (r) => r.hr_seniority },
+  { header: 'HR Location', field: 'hr_location', group: 'HR contact', get: (r) => r.hr_location },
+  { header: 'HR Extra Emails', field: 'hr_emails', group: 'HR contact', get: (r) => Array.isArray(r.hr_emails) ? r.hr_emails.join('; ') : r.hr_emails },
+  { header: 'HR Extra Phones', field: 'hr_phones', group: 'HR contact', get: (r) => Array.isArray(r.hr_phones) ? r.hr_phones.join('; ') : r.hr_phones },
+  { header: 'HR Email Verified', field: 'hr_email_verified', group: 'HR contact', get: (r) => (r.hr_email_verified ? 'YES' : 'no') },
   { header: 'HR Email', field: 'hr_email', group: 'HR contact', get: (r) => r.hr_email },
   { header: 'HR Mobile', field: 'hr_mobile', group: 'HR contact', get: (r) => r.hr_mobile },
   { header: 'HR LinkedIn', field: 'hr_linkedin_url', group: 'HR contact', get: (r) => r.hr_linkedin_url },
@@ -64,6 +71,9 @@ export const LEAD_COLUMNS: LeadColumn[] = [
   { header: 'Contact Found At', field: 'contact_url', group: 'HR contact', get: (r) => r.contact_url },
 
   { header: 'Company', field: 'company_name', group: 'Company', get: (r) => r.company_name },
+  { header: 'Employees', field: 'employee_count', group: 'Company', get: (r) => r.employee_count },
+  { header: 'Revenue', field: 'revenue', group: 'Company', get: (r) => r.revenue },
+  { header: 'Founded', field: 'founded_year', group: 'Company', get: (r) => r.founded_year },
   { header: 'Domain', field: 'company_domain', group: 'Company', get: (r) => r.company_domain },
   { header: 'Industry', field: 'industry', group: 'Company', get: (r) => r.industry },
   { header: 'Company Size', field: 'size_estimate', group: 'Company', get: (r) => r.size_estimate },

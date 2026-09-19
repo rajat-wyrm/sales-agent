@@ -8,13 +8,21 @@ interface JWTPayload {
   role: string;
 }
 
+// One resolution per request. `authorize()` runs as preValidation and
+// `authenticate()` as preHandler on the same request (several routes register
+// both), so without this cache every call re-ran the Redis revocation lookup AND
+// the `SELECT 1 FROM users` existence probe -- up to four round-trips per request
+// for an answer that cannot change mid-request. WeakMap keyed by the request
+// object: entries are collected with the request, so nothing leaks.
+const resolvedSubjects = new WeakMap<object, JWTPayload | null>();
+
 // A JWT stays valid for its full 7d TTL even after the account is deleted or the
 // database is re-seeded. Signature verification alone therefore lets requests
 // through with an id that has no row in `users`, and each route then hand-rolls
 // its own missing-user response (404 here, 500 there). Rejecting up front keeps
 // one contract -- 401 -- which is what the web client's response interceptor
 // listens for to refresh, and to log out when the refresh token is dead too.
-async function resolveSubject(request: FastifyRequest): Promise<JWTPayload | null> {
+async function resolveSubjectUncached(request: FastifyRequest): Promise<JWTPayload | null> {
   const token = (request.headers.authorization || '').replace('Bearer ', '');
   const redis = getRedis();
   if (redis) {
@@ -30,6 +38,15 @@ async function resolveSubject(request: FastifyRequest): Promise<JWTPayload | nul
 
   const existing = await getDB().unsafe(`SELECT 1 FROM users WHERE id = $1`, [user.id]);
   return existing.length > 0 ? user : null;
+}
+
+export function resolveSubject(request: FastifyRequest): Promise<JWTPayload | null> {
+  const cached = resolvedSubjects.get(request);
+  if (cached !== undefined) return Promise.resolve(cached);
+  return resolveSubjectUncached(request).then((payload) => {
+    resolvedSubjects.set(request, payload);
+    return payload;
+  });
 }
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply): Promise<void> {

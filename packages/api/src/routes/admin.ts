@@ -5,35 +5,55 @@ import { getDB } from '../utils/db';
 import { getRedis } from '../utils/redis';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/auth';
-import { encryptApiKeys, maskApiKeys } from '../utils/crypto';
+import { encryptApiKeys, hashPassword, maskApiKeys } from '../utils/crypto';
 import { logAuditEvent } from '../utils/audit';
 
 const triggerRunSchema = z.object({
   sources: z.array(z.string()).optional(),
 });
 
+// Every provider credential the UI renders. This list is the contract for
+// PUT /settings/api-keys: a key missing from it was silently dropped by zod, so
+// a user could paste a Reddit/Telegram/Adzuna credential and have it accepted
+// with a success toast while nothing was ever stored.
+export const SUPPORTED_API_KEY_FIELDS = [
+  'snovio',
+  'snovio_secret',
+  'contactout',
+  'resend',
+  'brevo',
+  'gemini',
+  'whatsapp',
+  'reacher',
+  'adzuna_app_id',
+  'adzuna_app_key',
+  'jooble',
+  'twitter',
+  'reddit_client_id',
+  'reddit_client_secret',
+  'telegram_api_id',
+  'telegram_api_hash',
+] as const;
+
+const apiKeysSchema = z.object({
+  api_keys: z
+    .object(
+      Object.fromEntries(
+        SUPPORTED_API_KEY_FIELDS.map((k) => [k, z.string().optional()]),
+      ) as Record<(typeof SUPPORTED_API_KEY_FIELDS)[number], z.ZodOptional<z.ZodString>>,
+    )
+    .optional(),
+});
+
 const settingsSchema = z.object({
   // Every field the Settings page renders must be accepted here. Keys omitted
   // from this schema were silently dropped on save, so a user could paste an
   // Adzuna/Reddit/Telegram credential, see it accepted, and nothing used it.
-  api_keys: z.object({
-    snovio: z.string().optional(),
-    snovio_secret: z.string().optional(),
-    contactout: z.string().optional(),
-    resend: z.string().optional(),
-    brevo: z.string().optional(),
-    gemini: z.string().optional(),
-    whatsapp: z.string().optional(),
-    reacher: z.string().optional(),
-    adzuna_app_id: z.string().optional(),
-    adzuna_app_key: z.string().optional(),
-    jooble: z.string().optional(),
-    twitter: z.string().optional(),
-    reddit_client_id: z.string().optional(),
-    reddit_client_secret: z.string().optional(),
-    telegram_api_id: z.string().optional(),
-    telegram_api_hash: z.string().optional(),
-  }).optional(),
+  // `api_keys` is deliberately NOT accepted here. This route writes its payload
+  // verbatim into the `settings` table, so allowing it would have stored provider
+  // credentials in PLAINTEXT, bypassing the AES-256-GCM encryption that
+  // PUT /settings/api-keys (the only credential path) applies. The web client
+  // only ever sends sources/scoring/cron/enrichment_order to this endpoint.
   scraper_config: z.object({
     max_concurrency: z.number().min(1).optional(),
     timeout_seconds: z.number().min(1).optional(),
@@ -41,6 +61,7 @@ const settingsSchema = z.object({
   scoring_weights: z.record(z.string(), z.number().min(0).max(100)).optional(),
   cron_schedule: z.string().min(1).optional(),
   sources_enabled: z.record(z.string(), z.boolean()).optional(),
+  enrichment_order: z.array(z.string().min(1)).min(1).max(12).optional(),
 });
 
 export const adminRoutes: FastifyPluginAsync = async (fastify) => {
@@ -189,18 +210,39 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     '/settings/api-keys',
     { preValidation: [authorize(['admin'])] },
     async (req, reply) => {
-      const parseResult = settingsSchema.safeParse(req.body);
+      const parseResult = apiKeysSchema.safeParse(req.body);
       if (!parseResult.success) {
         return reply.status(400).send({ error: 'Invalid body', details: parseResult.error.issues });
       }
       const { api_keys } = parseResult.data;
 
       const sql = getDB();
-      const encryptedKeys = api_keys ? encryptApiKeys(api_keys) : {};
+      const userId = (req.user as { id: string }).id;
+
+      // MERGE, never replace. The old code wrote `encryptApiKeys(api_keys)`
+      // straight over the column, so any submission that omitted a field deleted
+      // it. The Settings page submitted 6 of 16 fields, so one "Save Changes"
+      // wiped every other stored credential (incl. snovio_secret, which the
+      // worker needs to sign Snov.io requests). An empty/absent value now means
+      // "leave it alone"; only a real value overwrites.
+      const existingRows = await sql.unsafe(`SELECT api_keys FROM users WHERE id = $1`, [userId]);
+      const rawExisting = (existingRows as unknown as Array<{ api_keys: unknown }>)[0]?.api_keys;
+      let existing: Record<string, string> = {};
+      try {
+        const parsedExisting =
+          typeof rawExisting === 'string' ? JSON.parse(rawExisting) : rawExisting;
+        if (parsedExisting && typeof parsedExisting === 'object') {
+          existing = parsedExisting as Record<string, string>;
+        }
+      } catch {
+        // Unreadable/corrupt jsonb: start from empty rather than failing the save.
+      }
+
+      const encryptedKeys = { ...existing, ...encryptApiKeys(api_keys ?? {}) };
 
       await sql.unsafe(
         `UPDATE users SET api_keys = $1::jsonb, updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(encryptedKeys), (req.user as { id: string }).id],
+        [JSON.stringify(encryptedKeys), userId],
       );
 
       await logAuditEvent({
@@ -268,6 +310,70 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     `);
 
     return { users };
+  });
+
+  // Account provisioning. Self-registration is default-deny, so this is how a
+  // teammate gets an account: an admin creates it with an explicit role.
+  const createUserSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(8),
+    role: z.enum(['admin', 'sales_rep']).default('sales_rep'),
+  });
+
+  fastify.post('/users', { preValidation: [authorize(['admin'])] }, async (req, reply) => {
+    const parsed = createUserSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid body', details: parsed.error.issues });
+    }
+    const { email, password, role } = parsed.data;
+    const normalizedEmail = email.trim().toLowerCase();
+    const sql = getDB();
+
+    const existing = await sql.unsafe(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+    if ((existing as unknown[]).length > 0) {
+      return reply.status(409).send({ error: 'User already exists' });
+    }
+
+    const passwordHash = await hashPassword(password);
+    const created = await sql.unsafe(
+      `INSERT INTO users (email, password_hash, role, api_keys)
+       VALUES ($1, $2, $3, '{}'::jsonb)
+       RETURNING id, email, role, created_at`,
+      [normalizedEmail, passwordHash, role],
+    );
+
+    await logAuditEvent({
+      user_id: (req.user as { id: string }).id,
+      action: 'create_user',
+      resource_type: 'user',
+      resource_id: String((created as unknown as Array<{ id: string }>)[0]?.id ?? ''),
+      details: { email: normalizedEmail, role },
+    });
+
+    return reply.status(201).send({ message: 'User created', user: created[0] });
+  });
+
+  // Assign dropdown source: both roles may read id/email/role (no secrets).
+  // Admin-only /users above stays; this is the permission-aware member list.
+  fastify.get('/team/members', { preValidation: [authorize(['admin', 'sales_rep'])] }, async (_req, _reply) => {
+    const sql = getDB();
+    const users = await sql.unsafe(`
+      SELECT id, email, role
+      FROM users
+      ORDER BY email ASC
+      LIMIT 500
+    `);
+    return { members: users };
+  });
+
+  // Enrichment provider order (OSINT → Snov → ContactOut → Apollo default).
+  // Configurable without code changes; workers read it per job.
+  fastify.get('/enrichment/order', { preValidation: [authorize(['admin', 'sales_rep'])] }, async (_req, _reply) => {
+    const sql = getDB();
+    const rows = await sql.unsafe(`SELECT value FROM settings WHERE key = 'enrichment_order'`);
+    const def = ['osint', 'snovio', 'contactout', 'apollo'];
+    const val = (rows?.[0] as unknown as { value: string[] } | undefined)?.value;
+    return { order: Array.isArray(val) && val.length > 0 ? val : def };
   });
 
   fastify.get('/settings/api-keys', { preValidation: [authorize(['admin'])] }, async (req, reply) => {

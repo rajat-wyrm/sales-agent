@@ -81,7 +81,15 @@ async def health():
 
 
 @app.get("/scrapers")
-async def list_scrapers():
+async def list_scrapers(_auth: bool = Depends(require_worker_key)):
+    """Scraper catalogue + which sources are active.
+
+    Gated with the same worker key as the mutating endpoints. It used to be open
+    (GET only, "read endpoints are harmless"), but it enumerates every scraper
+    module and its tier -- an accurate inventory of where to aim attacks -- and
+    `active` is derived from the DB source toggles, i.e. internal configuration.
+    Loopback binding limits who can reach it, it does not authenticate.
+    """
     from scrapers.scrape_consumer import SCRAPER_MAP, DEFAULT_SOURCES
 
     return {
@@ -127,7 +135,13 @@ async def trigger_scrape(req: ScrapeRequest, _auth: bool = Depends(require_worke
 
 
 @app.get("/army/status")
-async def army_status():
+async def army_status(_auth: bool = Depends(require_worker_key)):
+    """Queue depths for every pipeline stage — drives the frontend live status.
+
+    The frontend reaches this through the Node API (GET /live/stats proxies it
+    with the server-side worker key), so a browser never needs a direct key.
+    Unguarded, it was a free pipeline-ops readout for anything on the host.
+    """
     """Queue depths for every pipeline stage — drives the frontend live status."""
     redis_client = get_redis()
     async def llen(k):

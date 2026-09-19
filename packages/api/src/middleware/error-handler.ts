@@ -27,6 +27,7 @@ export function errorHandler(error: FastifyError, _request: FastifyRequest, repl
   });
 }
 
+/** FastifyError factory for 404s raised inside handlers. */
 export function createNotFoundError(resource: string, id?: string): FastifyError {
   const err = new Error(`${resource}${id ? ` ${id}` : ''} not found`) as FastifyError;
   err.statusCode = 404;

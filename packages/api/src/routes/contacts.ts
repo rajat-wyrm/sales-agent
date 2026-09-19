@@ -36,10 +36,19 @@ export const contactsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const { page, limit, search } = parseResult.data;
     const offset = (page - 1) * limit;
+    const viewer = req.user as { id: string; role: string } | undefined;
 
     const conditions: string[] = [];
     const values: unknown[] = [];
     let paramIdx = 1;
+
+    // RBAC: a sales_rep only sees contacts attached to leads they own
+    // (assigned OR claimed) — otherwise /contacts bypasses lead ownership.
+    if (viewer?.role === 'sales_rep') {
+      conditions.push(`EXISTS (SELECT 1 FROM leads l WHERE l.hr_contact_id = hc.id AND (l.assigned_to = $${paramIdx} OR l.claimed_by = $${paramIdx}))`);
+      values.push(viewer.id);
+      paramIdx++;
+    }
 
     if (search) {
       conditions.push(`(hc.full_name ILIKE $${paramIdx} OR c.name ILIKE $${paramIdx})`);
@@ -80,13 +89,14 @@ export const contactsRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const { id } = parseResult.data;
     const sql = getDB();
+    const detailViewer = req.user as { id: string; role: string } | undefined;
 
     const contact = await sql.unsafe(
       `SELECT hc.*, c.id as company_id, c.name as company_name
        FROM hr_contacts hc
        LEFT JOIN companies c ON hc.current_company_id = c.id
-       WHERE hc.id = $1`,
-      [id],
+       WHERE hc.id = $1${detailViewer?.role === 'sales_rep' ? ` AND EXISTS (SELECT 1 FROM leads l WHERE l.hr_contact_id = hc.id AND (l.assigned_to = $2 OR l.claimed_by = $2))` : ''}`,
+      (detailViewer?.role === 'sales_rep' ? [id, detailViewer.id] : [id]) as any,
     );
 
     if (!contact || contact.length === 0) {

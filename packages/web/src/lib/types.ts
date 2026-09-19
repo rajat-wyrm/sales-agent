@@ -57,6 +57,10 @@ export interface Lead {
   do_not_contact: boolean;
   possible_duplicate_of: string | null;
   assigned_to: string | null;
+  assigned_to_email?: string | null;
+  claimed_by?: string | null;
+  claimed_by_email?: string | null;
+  claimed_at?: string | null;
   created_at: string;
   updated_at: string;
   hr_extraction_provenance?: any;
@@ -69,6 +73,16 @@ export interface Lead {
   hr_linkedin_url: string | null;
   hr_email: string | null;
   hr_mobile: string | null;
+  hr_title?: string | null;
+  hr_department?: string | null;
+  hr_seniority?: string | null;
+  hr_location?: string | null;
+  hr_emails?: string[] | null;
+  hr_phones?: string[] | null;
+  hr_email_verified?: boolean | null;
+  employee_count?: number | null;
+  revenue?: string | null;
+  founded_year?: number | null;
   source_site: string | null;
   confidence_score?: number;
   contact_source?: string;

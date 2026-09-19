@@ -28,8 +28,15 @@ jest.mock('../src/utils/scoring', () => ({ recomputeLeadScore: jest.fn(), scoreE
 
 async function mockUnsafe(query: string, params: any[] = []) {
   executed.push({ sql: query, params });
-  if (/SELECT 1 FROM leads WHERE id = \$1::uuid AND assigned_to = \$2::uuid/.test(query)) {
-    return ownedByCaller.includes(params[0]) ? [{ '?column?': 1 }] : [];
+  if (/SELECT 1 FROM leads WHERE id = \$1$/.test(query)) {
+    return [{ '?column?': 1 }]; // admin existence probe
+  }
+  if (/SELECT 1 FROM leads WHERE id = \$1/.test(query)) {
+    // canReadLead: owned OR unclaimed pool. THEIRS is owned by someone else
+    // (claimed); MINE is owned by the caller; UNCLAIMED is the claim pool.
+    return ownedByCaller.includes(params[0]) || params[0] === UNCLAIMED
+      ? [{ '?column?': 1 }]
+      : [];
   }
   if (/id = ANY\(\$1::uuid\[\]\)/.test(query) && /assigned_to/.test(query)) {
     const [, role, uid] = params as any[];
@@ -45,6 +52,7 @@ const mockLpush = jest.fn().mockResolvedValue(1);
 
 const MINE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const THEIRS = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const UNCLAIMED = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
 describe('per-lead RBAC across every mutating/reading route', () => {
   let app: FastifyInstance;
@@ -71,7 +79,12 @@ describe('per-lead RBAC across every mutating/reading route', () => {
   test('timeline for my lead works and does consult ownership', async () => {
     const res = await app.inject({ method: 'GET', url: `/leads/${MINE}/timeline` });
     expect(res.statusCode).toBe(200);
-    expect(executed.some((e) => /assigned_to = \$3?/.test(e.sql) || /AND assigned_to/.test(e.sql))).toBe(true);
+    expect(executed.some((e) => /assigned_to/.test(e.sql) && /claimed_by/.test(e.sql))).toBe(true);
+  });
+
+  test('timeline for an unclaimed lead is readable (claim pool inspection)', async () => {
+    const res = await app.inject({ method: 'GET', url: `/leads/${UNCLAIMED}/timeline` });
+    expect(res.statusCode).toBe(200);
   });
 
   test('admin may read any timeline', async () => {

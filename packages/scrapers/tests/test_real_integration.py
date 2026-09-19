@@ -337,6 +337,13 @@ async def test_process_enrichment_job_sentinel_runs_end_to_end(db_pool, redis_cl
         ("osint_contacts", "crtsh_emails", _none),
         ("osint_contacts", "wayback_emails", _none),
         ("osint_contacts", "gravatar_lookup", lambda e: {}),
+        # Tier-0 hiring-team discovery (company_hr_extractor) is also a network
+        # tier: its DDG-HTML dork path hits live duckduckgo.com and loosely
+        # matched this FICTIONAL company to real search results ("Acme
+        # Interiors"), extracting a stranger's email and fabricating a locator —
+        # which is exactly what the stage assertion below guards against. Stub
+        # it like every other outbound tier so the run stays hermetic.
+        ("company_hr_extractor", "extract_hr_for_company", _empty),
     ]:
         monkeypatch.setattr(importlib.import_module("scrapers.utils." + mod), fn, repl)
 

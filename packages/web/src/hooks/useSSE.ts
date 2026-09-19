@@ -95,7 +95,12 @@ function scheduleReconnect() {
 function open() {
   if (typeof EventSource === 'undefined' || !currentToken || !visible) return;
   closeSocket();
-  const es = new EventSource(`${SSE_BASE}/sse/token?token=${encodeURIComponent(currentToken)}`);
+  // Authenticated by the HttpOnly `sse_auth` cookie set at login/refresh, NOT by
+  // a token in the URL. The previous `?token=<jwt>` form put a full 7-day access
+  // token into every nginx access log line, the browser history entry and any
+  // Referer header, and the endpoint that accepted it had no revocation check.
+  // withCredentials makes the cookie travel when the API is on another origin.
+  const es = new EventSource(`${SSE_BASE}/sse`, { withCredentials: true });
   es.onopen = () => {
     attempt = 0; // healthy again; next failure backs off from 1s
   };

@@ -7,7 +7,7 @@ import { Spinner } from "@/components/ui/spinner"
 export type StatTone = "primary" | "success" | "warning" | "danger" | "info" | "muted"
 
 const toneMap: Record<StatTone, string> = {
-  primary: "bg-gradient-to-br from-primary/25 to-info/20 text-primary-hover shadow-glow-sm",
+  primary: "bg-primary-soft text-primary",
   success: "bg-success-soft text-success",
   warning: "bg-warning-soft text-warning",
   danger: "bg-hot-soft text-hot",
@@ -66,7 +66,7 @@ export function StatCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
       className={cn(
-        "card group relative flex items-start gap-phi2 overflow-hidden rounded-2xl p-phi3 transition-all duration-300 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-glow-sm",
+        "card group relative flex items-start gap-phi2 overflow-hidden rounded-2xl p-phi3 transition-all duration-300 hover:-translate-y-0.5 hover:border-border-strong hover:shadow-float",
         className
       )}
     >
@@ -84,7 +84,7 @@ export function StatCard({
           {loading ? (
             <div className="skeleton h-7 w-16" />
           ) : (
-            <span className="text-gradient text-2xl font-semibold tracking-tight tabular-nums">
+            <span className="text-ink-strong text-2xl font-semibold tracking-tight tabular-nums">
               {isNum ? counted.toLocaleString() : value ?? "—"}
             </span>
           )}

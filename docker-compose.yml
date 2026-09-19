@@ -64,7 +64,11 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # Loopback only. Everything that needs the API reaches it over the compose
+      # network (web -> nginx -> api); publishing 3000 on 0.0.0.0 exposed the API
+      # -- including /metrics and every unauthenticated endpoint -- on every host
+      # interface, bypassing the reverse proxy entirely.
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
   web:
@@ -96,23 +100,46 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped
-    volumes:
-      - ./packages/scrapers:/app
+    # NOTE: there is deliberately NO bind mount of ./packages/scrapers here.
+    # It used to mount the source tree over the image's /app, which means the
+    # production container ran whatever happened to be on the host filesystem --
+    # an uncommitted edit, a stray .pyc, or a half-finished refactor -- instead of
+    # the reviewed artifact baked into the image. Use docker-compose.dev.yml
+    # (`docker compose -f docker-compose.yml -f docker-compose.dev.yml up`) when
+    # you want live-reload while developing.
 
   reacher:
-    image: reacherhq/check-if-email-exists:latest
+    # Digest pin (unpinned :latest meant an upstream release could silently change
+    # the verifier's behaviour, or its response contract, on any redeploy).
+    image: reacherhq/check-if-email-exists@sha256:0c38855658952b92e6d5300c79c5578b0a1f81bab8eacb3693fdd15a9b74a017
     container_name: sales-agent-reacher
     ports:
       - "127.0.0.1:5050:3000"
     restart: unless-stopped
 
   n8n:
-    image: n8nio/n8n:latest
+    # Version + digest pin: a floating :latest means an unattended redeploy can
+    # change the automation engine under you. 2.39.8 is the version this stack was
+    # verified against.
+    image: n8nio/n8n:2.39.8@sha256:b73045abaddb40cb4024e86eea1b1f69093501a7339f685a4cd486b7743d23ae
     container_name: sales-agent-n8n
     environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-admin123}
+      # The previous N8N_BASIC_AUTH_ACTIVE / _USER / _PASSWORD block did NOTHING:
+      # n8n removed HTTP basic auth in 1.0, and this image is 2.x, so those vars
+      # were ignored and the editor (plus its REST API, which can execute
+      # workflows) was reachable with NO credential on 127.0.0.1:5678. The only
+      # trace of "protection" was a misleading `admin123` fallback password.
+      # n8n >= 2.17.0 can pre-provision the instance owner instead, and it fails
+      # CLOSED on BOTH vars: with MANAGED_BY_ENV=true and an empty email or hash
+      # the container exits ("N8N_INSTANCE_OWNER_EMAIL is required...") instead of
+      # coming up unauthenticated. Both exits verified against n8nio/n8n:2.39.8.
+      # Generate the hash with:
+      #   node -e "console.log(require('bcryptjs').hashSync(process.argv[1],12))" 'YOUR-PASSWORD'
+      - N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true
+      - N8N_INSTANCE_OWNER_EMAIL=${N8N_OWNER_EMAIL:-}
+      - N8N_INSTANCE_OWNER_FIRST_NAME=${N8N_OWNER_FIRST_NAME:-Admin}
+      - N8N_INSTANCE_OWNER_LAST_NAME=${N8N_OWNER_LAST_NAME:-User}
+      - N8N_INSTANCE_OWNER_PASSWORD_HASH=${N8N_OWNER_PASSWORD_HASH:-}
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
